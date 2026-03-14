@@ -76,7 +76,7 @@ void setup() {
   if (!ina219.begin()) {
     DBGLN("INA219 not found – check wiring");
   } else {
-    ina219.setCalibration_32V_32mA();  // lowest range, best resolution
+    ina219.setCalibration_32V_2A();  // lowest available range in this library version
     DBGLN("INA219 ready");
   }
 
