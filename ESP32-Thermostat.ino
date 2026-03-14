@@ -132,7 +132,7 @@ void controlLoop() {
 
 // ─── WiFi / AP ────────────────────────────────────────────────────────────────
 void connectWifi() {
-  WiFi.setTxPower(WIFI_POWER_15dBm);
+  WiFi.setTxPower(WIFI_POWER_11dBm);
   WiFi.mode(WIFI_STA);
   WiFi.begin(savedSSID.c_str(), savedPSK.c_str());
   DBGLN("Connecting to WiFi...");
