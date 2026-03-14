@@ -21,12 +21,17 @@
 #endif
 
 // ─── Hardware ─────────────────────────────────────────────────────────────────
-#define MOSFET_PIN  3
-#define INA219_SDA  8
-#define INA219_SCL  9
-#define HOSTNAME    "thermostat"
-#define WIFI_TIMEOUT_MS   20000   // ms to wait for STA connect on boot
-#define WIFI_RETRY_MS    300000   // ms between background STA reconnect attempts (5 min)
+#define MOSFET_PIN       3
+#define INA219_SDA       8
+#define INA219_SCL       9
+#define HOSTNAME         "thermostat"
+#define WIFI_TIMEOUT_MS  20000
+#define WIFI_RETRY_MS   300000
+
+// C3 Supermini has a known PCB antenna defect - reflections cause TX to jam itself.
+// Workaround: set TX power LOW *after* WiFi.begin(). 8.5dBm is the known sweet spot.
+// See: https://github.com/espressif/arduino-esp32/issues/6551
+#define WIFI_TX_POWER    WIFI_POWER_8_5dBm
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences     prefs;
@@ -39,11 +44,11 @@ float    currentTemp = 0.0;
 bool     outputOn    = false;
 bool     apMode      = false;
 
-float    probeOffset  = 0.0;
-float    hysteresis   = 5.0;
-int      probeType    = 0;      // 0=K, 1=J
-String   savedSSID    = MYSSID;
-String   savedPSK     = MYPSK;
+float    probeOffset = 0.0;
+float    hysteresis  = 5.0;
+int      probeType   = 0;      // 0=K, 1=J
+String   savedSSID   = MYSSID;
+String   savedPSK    = MYPSK;
 
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
 
@@ -52,7 +57,7 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
-unsigned long lastSample   = 0;
+unsigned long lastSample    = 0;
 unsigned long lastWifiRetry = 0;
 #define SAMPLE_MS 5000
 
@@ -67,7 +72,7 @@ void controlLoop();
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  delay(200);  // let serial settle
+  delay(200);
   pinMode(MOSFET_PIN, OUTPUT);
   digitalWrite(MOSFET_PIN, LOW);
 
@@ -77,13 +82,10 @@ void setup() {
 
   loadPrefs();
 
-  // Reset WiFi state cleanly before doing anything
-  WiFi.persistent(false);       // don't let SDK auto-save creds (we handle it)
-  WiFi.disconnect(true, true);  // disconnect + erase SDK stored creds
+  WiFi.persistent(false);
+  WiFi.disconnect(true, true);
   delay(100);
-  WiFi.setTxPower(WIFI_POWER_15dBm);
 
-  // Try STA first; fall back to AP immediately if timeout
   startSTA();
   unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
@@ -108,7 +110,6 @@ void loop() {
   ArduinoOTA.handle();
   server.handleClient();
 
-  // Background STA reconnect: if in AP mode, periodically try to rejoin STA
   if (apMode && millis() - lastWifiRetry > WIFI_RETRY_MS) {
     lastWifiRetry = millis();
     DBGLN("Retrying STA...");
@@ -124,9 +125,10 @@ void loop() {
       apMode = false;
       onWifiConnect();
     } else {
-      // Back to AP — restart softAP so clients can still connect
       WiFi.mode(WIFI_AP);
       WiFi.softAP("Thermostat-Setup", "configure");
+      WiFi.setTxPower(WIFI_TX_POWER);
+      delay(100);
       dns.start(53, "*", WiFi.softAPIP());
     }
   }
@@ -146,6 +148,7 @@ void loop() {
 void startSTA() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(savedSSID.c_str(), savedPSK.c_str());
+  WiFi.setTxPower(WIFI_TX_POWER);  // MUST be set AFTER begin() on C3 Supermini
   DBG("Connecting to "); DBGLN(savedSSID);
 }
 
@@ -153,7 +156,8 @@ void startAP() {
   apMode = true;
   WiFi.mode(WIFI_AP);
   WiFi.softAP("Thermostat-Setup", "configure");
-  delay(100);  // softAP needs a moment before DNS
+  WiFi.setTxPower(WIFI_TX_POWER);  // Also needed for AP visibility on C3 Supermini
+  delay(200);  // give softAP time to fully start
   dns.start(53, "*", WiFi.softAPIP());
   DBG("AP IP: "); DBGLN(WiFi.softAPIP());
 }
@@ -161,7 +165,7 @@ void startAP() {
 void onWifiConnect() {
   apMode = false;
   DBG("\nIP: "); DBGLN(WiFi.localIP());
-  MDNS.end();  // restart cleanly in case of reconnect
+  MDNS.end();
   if (MDNS.begin(HOSTNAME)) DBGLN("mDNS: " HOSTNAME ".local");
 }
 
@@ -225,12 +229,12 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    String j = "{\"temp\":"      + String(currentTemp,  1)
-             + ",\"setpoint\":" + String(setpoint,      1)
-             + ",\"output\":"   + String(outputOn ? 1 : 0)
-             + ",\"hysteresis\":" + String(hysteresis,  1)
-             + ",\"offset\":"   + String(probeOffset,   1)
-             + ",\"probeType\":" + String(probeType)
+    String j = "{\"temp\":"        + String(currentTemp,  1)
+             + ",\"setpoint\":"   + String(setpoint,      1)
+             + ",\"output\":"     + String(outputOn ? 1 : 0)
+             + ",\"hysteresis\":" + String(hysteresis,    1)
+             + ",\"offset\":"     + String(probeOffset,   1)
+             + ",\"probeType\":"  + String(probeType)
              + "}";
     server.send(200, "application/json", j);
   });
