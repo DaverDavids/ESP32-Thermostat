@@ -26,8 +26,8 @@ const uint8_t PIN_MOSFET  =  3;
 const uint8_t PIN_SDA     =  8;
 const uint8_t PIN_SCL     =  9;
 const uint8_t PIN_BTN_UP  =  4;
-const uint8_t PIN_BTN_DN  =  5;
-const uint8_t PIN_BTN_CTR =  6;
+const uint8_t PIN_BTN_DN  =  6;
+const uint8_t PIN_BTN_CTR =  5;
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
@@ -42,7 +42,7 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t SAMPLE_MS  = 5000;
+const uint32_t SAMPLE_MS  = 1000;
 const uint32_t DISPLAY_MS =  200;
 
 // ─── Button debounce ──────────────────────────────────────────────────────────
@@ -52,10 +52,10 @@ const uint32_t DEBOUNCE_MS = 30;
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  400;
 const uint32_t RAMP_RATE_INITIAL_MS =  200;
-const uint32_t RAMP_RATE_MIN_MS     =   30;
+const uint32_t RAMP_RATE_MIN_MS     =   10;
 const float    RAMP_ACCEL           = 0.85f;
-const float    SP_STEP_INITIAL      =  5.0f;
-const float    SP_STEP_MAX          = 50.0f;
+const float    SP_STEP_INITIAL      =  1.0f;
+const float    SP_STEP_MAX          = 1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
