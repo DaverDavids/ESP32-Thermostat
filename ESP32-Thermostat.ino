@@ -21,46 +21,56 @@
   #define DBGLN(x)
 #endif
 
-// ─── Hardware pins ────────────────────────────────────────────────────────────────
-#define MOSFET_PIN      3
-#define INA219_SDA      8
-#define INA219_SCL      9
-#define BTN_UP          4
-#define BTN_DOWN        5
-#define BTN_CENTER      6
+// ─── Pin assignments — change here if you rewire ──────────────────────────────────────
+const uint8_t PIN_MOSFET  =  3;
+const uint8_t PIN_SDA     =  8;   // I2C SDA (INA219 + OLED shared)
+const uint8_t PIN_SCL     =  9;   // I2C SCL
+const uint8_t PIN_BTN_UP  =  4;   // 3-way switch UP
+const uint8_t PIN_BTN_DN  =  5;   // 3-way switch DOWN
+const uint8_t PIN_BTN_CTR =  6;   // 3-way switch CENTER (manual toggle)
 
-// OLED (I2C shared with INA219)
-#define OLED_WIDTH      128
-#define OLED_HEIGHT      64
-#define OLED_ADDR      0x3C
+// ─── OLED ───────────────────────────────────────────────────────────────────────
+const uint8_t  OLED_W    = 128;
+const uint8_t  OLED_H    =  64;
+const uint8_t  OLED_ADDR = 0x3C;
 
-// WiFi
-#define HOSTNAME        "thermostat"
-#define WIFI_TIMEOUT_MS  20000
-#define WIFI_RETRY_MS   300000
-#define WIFI_TX_POWER   WIFI_POWER_8_5dBm  // C3 Supermini antenna fix
+// ─── WiFi ───────────────────────────────────────────────────────────────────────
+const char*    HOSTNAME        = "thermostat";
+const uint32_t WIFI_TIMEOUT_MS =  20000;
+const uint32_t WIFI_RETRY_MS   = 300000;
+#define        WIFI_TX_POWER     WIFI_POWER_8_5dBm  // C3 Supermini antenna fix
 
-// Button debounce / repeat
-#define DEBOUNCE_MS      50
-#define REPEAT_DELAY_MS 500   // hold before auto-repeat starts
-#define REPEAT_RATE_MS  150   // auto-repeat interval
-#define SP_STEP          5.0f // setpoint change per click (deg C)
+// ─── Timing ─────────────────────────────────────────────────────────────────────
+const uint32_t SAMPLE_MS  = 5000;  // thermocouple read interval
+const uint32_t DISPLAY_MS =  200;  // OLED refresh interval
+
+// ─── Setpoint ramp (hold-to-accelerate) ───────────────────────────────────────────
+// First tick fires immediately on press. After RAMP_DELAY_MS the repeat
+// starts at RAMP_RATE_INITIAL_MS and accelerates each tick by RAMP_ACCEL
+// (multiplier <1 = faster), floored at RAMP_RATE_MIN_MS.
+const uint32_t RAMP_DELAY_MS       =  400;  // pause before auto-repeat begins
+const uint32_t RAMP_RATE_INITIAL_MS=  200;  // first repeat interval (ms)
+const uint32_t RAMP_RATE_MIN_MS    =   30;  // fastest allowed repeat interval
+const float    RAMP_ACCEL          = 0.85f; // multiply interval each tick (0.85 = 15% faster each step)
+const float    SP_STEP_INITIAL     =  5.0f; // deg C per tick at start
+const float    SP_STEP_MAX         = 50.0f; // deg C per tick at full speed
+const float    SP_STEP_ACCEL       = 1.15f; // multiply step size each tick
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
-Preferences     prefs;
-WebServer       server(80);
-DNSServer       dns;
-Adafruit_INA219 ina219;
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+Preferences      prefs;
+WebServer        server(80);
+DNSServer        dns;
+Adafruit_INA219  ina219;
+Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 
-float    setpoint    = 500.0;
-float    currentTemp = 0.0;
+float    setpoint    = 500.0f;
+float    currentTemp =   0.0f;
 bool     outputOn    = false;
 bool     apMode      = false;
 
-float    probeOffset = 0.0;
-float    hysteresis  = 5.0;
-int      probeType   = 0;      // 0=K, 1=J
+float    probeOffset =  0.0f;
+float    hysteresis  =  5.0f;
+int      probeType   =  0;      // 0=K, 1=J
 String   savedSSID   = MYSSID;
 String   savedPSK    = MYPSK;
 
@@ -71,48 +81,45 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
-unsigned long lastSample    = 0;
-unsigned long lastWifiRetry = 0;
-unsigned long lastDisplayUpdate = 0;
-#define SAMPLE_MS        5000
-#define DISPLAY_MS        500
+unsigned long lastSample       = 0;
+unsigned long lastWifiRetry    = 0;
+unsigned long lastDisplayUpdate= 0;
 
-// Button state tracking for debounce + hold-repeat
+// Per-button ramp state
 struct BtnState {
-  uint8_t pin;
-  bool    lastRaw;
-  bool    pressed;       // debounced press event (single shot)
+  uint8_t  pin;
+  bool     lastRaw;
+  bool     held;
   unsigned long downAt;
-  unsigned long repeatAt;
+  unsigned long nextFire;
+  float    currentInterval;  // ms, shrinks as you hold
+  float    currentStep;      // deg C, grows as you hold
 } btns[3];
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
-float readTempC();
-void controlLoop();
-void updateButtons();
-bool btnFired(uint8_t idx);
-void updateDisplay();
+float readTempC(); void controlLoop();
+void updateButtons(); void updateDisplay();
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(200);
 
-  pinMode(MOSFET_PIN, OUTPUT);
-  digitalWrite(MOSFET_PIN, LOW);
+  pinMode(PIN_MOSFET, OUTPUT);
+  digitalWrite(PIN_MOSFET, LOW);
 
-  // Buttons: active-low with internal pullup
-  btns[0] = { BTN_UP,     true, false, 0, 0 };
-  btns[1] = { BTN_DOWN,   true, false, 0, 0 };
-  btns[2] = { BTN_CENTER, true, false, 0, 0 };
-  for (auto &b : btns) pinMode(b.pin, INPUT_PULLUP);
+  uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
+  for (int i = 0; i < 3; i++) {
+    btns[i] = { btnPins[i], true, false, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
+    pinMode(btnPins[i], INPUT_PULLUP);
+  }
 
-  Wire.begin(INA219_SDA, INA219_SCL);
+  Wire.begin(PIN_SDA, PIN_SCL);
 
-  if (!ina219.begin()) { DBGLN("INA219 not found"); }
+  if (!ina219.begin())               { DBGLN("INA219 not found"); }
   else { ina219.setCalibration_32V_2A(); DBGLN("INA219 ready"); }
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
@@ -120,20 +127,17 @@ void setup() {
   } else {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(0, 0);
+    display.setTextSize(2);
+    display.setCursor(10, 20);
     display.println("Thermostat");
-    display.println("Starting...");
     display.display();
     DBGLN("OLED ready");
   }
 
   loadPrefs();
-
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
   delay(100);
-
   startSTA();
   unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
@@ -154,28 +158,36 @@ void loop() {
   server.handleClient();
   updateButtons();
 
-  // UP: raise setpoint
-  if (btnFired(0)) {
-    setpoint += SP_STEP;
+  unsigned long now = millis();
+
+  // UP button: accelerating setpoint raise
+  if (btns[0].held && now >= btns[0].nextFire) {
+    setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
+    btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
+    btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
+    btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
     savePrefs();
-    DBGLN("SP+");
   }
-  // DOWN: lower setpoint
-  if (btnFired(1)) {
-    setpoint -= SP_STEP;
+
+  // DOWN button: accelerating setpoint lower
+  if (btns[1].held && now >= btns[1].nextFire) {
+    setpoint = max(setpoint - btns[1].currentStep, 0.0f);
+    btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
+    btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
+    btns[1].nextFire        = now + (unsigned long)btns[1].currentInterval;
     savePrefs();
-    DBGLN("SP-");
   }
-  // CENTER: toggle output lock (manual override off)
-  if (btnFired(2)) {
+
+  // CENTER: single-fire manual output toggle (no repeat)
+  if (!btns[2].lastRaw && !digitalRead(PIN_BTN_CTR)) {  // fresh press only
     outputOn = !outputOn;
-    digitalWrite(MOSFET_PIN, outputOn ? HIGH : LOW);
+    digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
     DBGLN("Manual toggle");
   }
 
   // Background WiFi retry
-  if (apMode && millis() - lastWifiRetry > WIFI_RETRY_MS) {
-    lastWifiRetry = millis();
+  if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
+    lastWifiRetry = now;
     WiFi.disconnect(true); delay(100);
     startSTA();
     unsigned long t = millis();
@@ -192,8 +204,8 @@ void loop() {
   }
 
   // Temperature sample
-  if (millis() - lastSample >= SAMPLE_MS) {
-    lastSample = millis();
+  if (now - lastSample >= SAMPLE_MS) {
+    lastSample = now;
     currentTemp = readTempC();
     DBG("T: "); DBGLN(currentTemp);
     tempHistory[histHead] = currentTemp;
@@ -203,80 +215,95 @@ void loop() {
   }
 
   // Display refresh
-  if (millis() - lastDisplayUpdate >= DISPLAY_MS) {
-    lastDisplayUpdate = millis();
+  if (now - lastDisplayUpdate >= DISPLAY_MS) {
+    lastDisplayUpdate = now;
     updateDisplay();
   }
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────────
+// Layout (128x64):
+//  Left half (0-61):  current temp, big text
+//  Right half (67-127): setpoint, big text
+//  Divider: vertical line at x=63
+//  Bottom row (y=52-63): WiFi status small text
+//  When output ON: thick inverted border (3px) drawn around entire screen
 void updateDisplay() {
   display.clearDisplay();
 
-  // Row 1: big current temp
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(currentTemp, 1);
-  display.print((char)247);  // degree symbol
-  display.println("C");
+  // ─ Divider
+  display.drawFastVLine(63, 0, 52, SSD1306_WHITE);
 
-  // Row 2: setpoint + output state
+  // ─ Left: current temp label + value
   display.setTextSize(1);
-  display.setCursor(0, 20);
-  display.print("SP:");
-  display.print(setpoint, 0);
-  display.print((char)247);
-  display.print("C  ");
-  display.println(outputOn ? "[ON] " : "[OFF]");
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("TEMP");
 
-  // Row 3: WiFi status
-  display.setCursor(0, 32);
+  display.setTextSize(2);
+  display.setCursor(0, 12);
+  // Fit: 999.9 = 5 chars @ size2 = 60px wide, tight but ok
+  display.print((int)currentTemp);
+  display.setTextSize(1);
+  display.setCursor(0, 36);
+  display.print(".");
+  display.print((int)(fabs(currentTemp - (int)currentTemp) * 10));
+  display.print((char)247); display.print("C");
+
+  // ─ Right: setpoint label + value
+  display.setTextSize(1);
+  display.setCursor(67, 0);
+  display.print("SET");
+
+  display.setTextSize(2);
+  display.setCursor(67, 12);
+  display.print((int)setpoint);
+  display.setTextSize(1);
+  display.setCursor(67, 36);
+  display.print((char)247); display.print("C");
+
+  // ─ Bottom: WiFi info
+  display.setTextSize(1);
+  display.setCursor(0, 54);
   if (apMode) {
-    display.print("AP: Thermostat-Setup");
+    display.print("AP:Thermostat-Setup");
   } else {
-    display.print("IP:");
     display.print(WiFi.localIP());
   }
 
-  // Row 4: mini bar graph (last 64 samples scaled to 8px height)
-  display.setCursor(0, 44);
-  display.print("Hist:");
-  uint16_t bars = min((uint16_t)64, histCount);
-  uint16_t start = (histCount <= 64) ? 0 : (histHead + HIST_SIZE - 64) % HIST_SIZE;
-  float mn = currentTemp - 50, mx = currentTemp + 50;
-  for (uint16_t i = 0; i < bars; i++) {
-    float v = tempHistory[(start + i) % HIST_SIZE];
-    int h = constrain((int)((v - mn) / (mx - mn) * 8), 0, 8);
-    display.drawFastVLine(64 + i, 63 - h, h, SSD1306_WHITE);
+  // ─ Output ON indicator: inverted 3px border
+  if (outputOn) {
+    // draw 3 concentric rectangles to make a thick border, inverted
+    for (int t = 0; t < 3; t++) {
+      display.drawRect(t, t, OLED_W - 2*t, OLED_H - 2*t, SSD1306_INVERSE);
+    }
   }
-  // Setpoint line on bar graph
-  int spY = constrain((int)((setpoint - mn) / (mx - mn) * 8), 0, 8);
-  display.drawFastHLine(64, 63 - spY, 64, SSD1306_WHITE);
 
   display.display();
 }
 
-// ─── Button handling ──────────────────────────────────────────────────────────────
+// ─── Button handling (accelerating ramp) ─────────────────────────────────────────
 void updateButtons() {
   unsigned long now = millis();
-  for (auto &b : btns) {
-    b.pressed = false;
-    bool raw = !digitalRead(b.pin);  // active low
-    if (raw && !b.lastRaw) {
-      // fresh press
-      b.downAt   = now;
-      b.repeatAt = now + REPEAT_DELAY_MS;
-      b.pressed  = true;
-    } else if (raw && now >= b.repeatAt) {
-      // held down - auto-repeat
-      b.repeatAt = now + REPEAT_RATE_MS;
-      b.pressed  = true;
+  for (int i = 0; i < 3; i++) {
+    bool raw = !digitalRead(btns[i].pin);  // active low
+    if (raw && !btns[i].lastRaw) {
+      // Fresh press: fire immediately, reset ramp
+      btns[i].held            = true;
+      btns[i].downAt          = now;
+      btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
+      btns[i].currentStep     = SP_STEP_INITIAL;
+      btns[i].nextFire        = now + RAMP_DELAY_MS;  // first repeat after delay
+      // Immediate first tick for UP/DOWN
+      if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
+      if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
     }
-    b.lastRaw = raw;
+    if (!raw) {
+      btns[i].held = false;
+    }
+    btns[i].lastRaw = raw;
   }
 }
-
-bool btnFired(uint8_t idx) { return btns[idx].pressed; }
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float readTempC() {
@@ -292,7 +319,7 @@ float readTempC() {
 void controlLoop() {
   if      (currentTemp < setpoint - hysteresis) outputOn = true;
   else if (currentTemp > setpoint + hysteresis) outputOn = false;
-  digitalWrite(MOSFET_PIN, outputOn ? HIGH : LOW);
+  digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
 }
 
 // ─── WiFi helpers ───────────────────────────────────────────────────────────────
