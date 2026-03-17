@@ -46,7 +46,6 @@ const uint32_t SAMPLE_MS  = 1000;
 const uint32_t DISPLAY_MS =  200;
 
 // ─── Button debounce ──────────────────────────────────────────────────────────
-// Pin must read LOW continuously for DEBOUNCE_MS before a press is accepted.
 const uint32_t DEBOUNCE_MS = 30;
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
@@ -70,6 +69,10 @@ float    currentTemp =   0.0f;
 bool     outputOn    = false;
 bool     apMode      = false;
 
+// When true, the center button has manually forced outputOn;
+// controlLoop() is bypassed until center is pressed again.
+bool     manualOverride = false;
+
 float    probeOffset =  0.0f;
 float    hysteresis  =  5.0f;
 int      probeType   =  0;
@@ -89,7 +92,7 @@ unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
 
 // ─── Button state ─────────────────────────────────────────────────────────────
-// BTN_ prefix avoids collision with PENDING/IDLE/HELD in ESP32 ROM ets_sys.h
+// BTN_ prefix avoids collision with ESP32 ROM ets_sys.h STATUS enum
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
 
 struct BtnState {
@@ -222,7 +225,7 @@ void loop() {
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
-    controlLoop();
+    if (!manualOverride) controlLoop();   // skip auto control while in manual mode
   }
 
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
@@ -234,6 +237,12 @@ void loop() {
 }
 
 // ─── Display ──────────────────────────────────────────────────────────────────
+//
+// Normal:   [ 423  >  500 ]   output ON, auto control
+// Manual:   [ 423  M  500 ]   output ON,  manual override
+// Manual:   [ 423     500 ]   output OFF, manual override (arrow gone)
+// Auto off: [ 423     500 ]   output OFF, auto control
+//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -251,7 +260,13 @@ void updateDisplay() {
   display.setCursor(tempX, Y);
   display.print(tempStr);
 
-  if (outputOn) {
+  // Center indicator: > = auto on, M = manual override on, blank = off
+  if (manualOverride && outputOn) {
+    display.setTextSize(2);          // M is wide at size 3; size 2 fits neatly
+    display.setCursor(ARROW_X, 8);  // re-center vertically for size-2
+    display.print("M");
+    display.setTextSize(3);
+  } else if (outputOn) {
     display.setCursor(ARROW_X, Y);
     display.print(">");
   }
@@ -264,13 +279,11 @@ void updateDisplay() {
 
 // ─── Button handling ──────────────────────────────────────────────────────────
 //
-//   BTN_IDLE:    pin HIGH -> stay
-//                pin LOW  -> go BTN_PENDING, record time
-//   BTN_PENDING: pin HIGH -> glitch, back to BTN_IDLE
-//                pin LOW, < DEBOUNCE_MS -> wait
-//                pin LOW, >= DEBOUNCE_MS -> confirmed, go BTN_HELD, fire first action
-//   BTN_HELD:    pin HIGH -> released, back to BTN_IDLE, reset ramp
-//                pin LOW  -> stay (ramp handled in loop())
+// Center button behavior:
+//   Press 1: enter manual override, output ON,  controlLoop() suspended
+//   Press 2: stay manual override,  output OFF
+//   Press 3: exit manual override,  controlLoop() resumes
+// (i.e. first press = manual ON, second = manual OFF, third = back to auto)
 //
 void updateButtons() {
   unsigned long now = millis();
@@ -294,12 +307,27 @@ void updateButtons() {
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
           btns[i].nextFire        = now + RAMP_DELAY_MS;
+
           if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
           if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
+
           if (i == 2) {
-            outputOn = !outputOn;
-            digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
-            DBGLN("Manual toggle");
+            if (!manualOverride) {
+              // Enter manual override, force ON
+              manualOverride = true;
+              outputOn       = true;
+              digitalWrite(PIN_MOSFET, HIGH);
+              DBGLN("Manual ON");
+            } else if (outputOn) {
+              // Already in manual override and ON -> turn OFF
+              outputOn = false;
+              digitalWrite(PIN_MOSFET, LOW);
+              DBGLN("Manual OFF");
+            } else {
+              // In manual override and OFF -> exit back to auto
+              manualOverride = false;
+              DBGLN("Auto mode");
+            }
           }
         }
         break;
@@ -402,12 +430,13 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    String j = "{\"temp\":"        + String(currentTemp,  1)
-             + ",\"setpoint\":"   + String(setpoint,      1)
-             + ",\"output\":"     + String(outputOn ? 1 : 0)
-             + ",\"hysteresis\":" + String(hysteresis,    1)
-             + ",\"offset\":"     + String(probeOffset,   1)
-             + ",\"probeType\":"  + String(probeType)
+    String j = "{\"temp\":"          + String(currentTemp,    1)
+             + ",\"setpoint\":"     + String(setpoint,        1)
+             + ",\"output\":"       + String(outputOn ? 1 : 0)
+             + ",\"manual\":"       + String(manualOverride ? 1 : 0)
+             + ",\"hysteresis\":"   + String(hysteresis,      1)
+             + ",\"offset\":"       + String(probeOffset,     1)
+             + ",\"probeType\":"    + String(probeType)
              + "}";
     server.send(200, "application/json", j);
   });
