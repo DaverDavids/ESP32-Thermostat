@@ -54,7 +54,7 @@ const uint32_t RAMP_RATE_INITIAL_MS =  100;
 const uint32_t RAMP_RATE_MIN_MS     =   1;
 const float    RAMP_ACCEL           = 0.85f;
 const float    SP_STEP_INITIAL      =  1.0f;
-const float    SP_STEP_MAX          = 1.0f;
+const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -68,9 +68,6 @@ float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
 bool     outputOn    = false;
 bool     apMode      = false;
-
-// When true, the center button has manually forced outputOn;
-// controlLoop() is bypassed until center is pressed again.
 bool     manualOverride = false;
 
 float    probeOffset =  0.0f;
@@ -92,7 +89,6 @@ unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
 
 // ─── Button state ─────────────────────────────────────────────────────────────
-// BTN_ prefix avoids collision with ESP32 ROM ets_sys.h STATUS enum
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
 
 struct BtnState {
@@ -225,7 +221,7 @@ void loop() {
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
-    if (!manualOverride) controlLoop();   // skip auto control while in manual mode
+    if (!manualOverride) controlLoop();
   }
 
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
@@ -238,39 +234,45 @@ void loop() {
 
 // ─── Display ──────────────────────────────────────────────────────────────────
 //
-// Normal:   [ 423  >  500 ]   output ON, auto control
-// Manual:   [ 423  M  500 ]   output ON,  manual override
-// Manual:   [ 423     500 ]   output OFF, manual override (arrow gone)
-// Auto off: [ 423     500 ]   output OFF, auto control
+// setTextSize(2): each char 12px wide x 16px tall, y=8 centers in 32px screen
+//
+// Layout (all columns fixed so numbers never shift):
+//   Temp     right-aligned, right edge at x=42   (3 digits = 36px, starts x=6)
+//   Label    left edge      at x=46              ("ON"=24px, "OFF"=36px)
+//   Setpoint left edge      at x=86              (3 digits = 36px, ends x=122)
+//
+// Total worst case: 42 + 4 + 36 + 4 + 36 = 122px < 128 ✓
+//
+// Center label meanings:
+//   "ON"  = manual override, output ON
+//   "OFF" = manual override, output OFF
+//   blank = automatic mode (no label shown)
 //
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(3);
+  display.setTextSize(2);
 
-  const int Y       = 4;
-  const int CHAR_W  = 18;
-  const int R_EDGE  = 56;
-  const int ARROW_X = 60;
-  const int SP_X    = 78;
+  const int Y      =  8;   // centers 16px text in 32px screen
+  const int CW     = 12;   // size-2 char width
+  const int T_REDGE = 42;  // right edge of temp field
+  const int LBL_X  = 46;  // left edge of center label
+  const int SP_X   = 86;  // left edge of setpoint field
 
+  // ─ Temp: right-aligned
   String tempStr = String((int)round(currentTemp));
-  int tempX = R_EDGE - (tempStr.length() * CHAR_W);
+  int tempX = T_REDGE - (int)(tempStr.length()) * CW;
   if (tempX < 0) tempX = 0;
   display.setCursor(tempX, Y);
   display.print(tempStr);
 
-  // Center indicator: > = auto on, M = manual override on, blank = off
-  if (manualOverride && outputOn) {
-    display.setTextSize(2);          // M is wide at size 3; size 2 fits neatly
-    display.setCursor(ARROW_X, 8);  // re-center vertically for size-2
-    display.print("M");
-    display.setTextSize(3);
-  } else if (outputOn) {
-    display.setCursor(ARROW_X, Y);
-    display.print(">");
+  // ─ Center label: only shown in manual override
+  if (manualOverride) {
+    display.setCursor(LBL_X, Y);
+    display.print(outputOn ? "ON" : "OFF");
   }
 
+  // ─ Setpoint: left-aligned
   display.setCursor(SP_X, Y);
   display.print((int)round(setpoint));
 
@@ -279,11 +281,10 @@ void updateDisplay() {
 
 // ─── Button handling ──────────────────────────────────────────────────────────
 //
-// Center button behavior:
-//   Press 1: enter manual override, output ON,  controlLoop() suspended
-//   Press 2: stay manual override,  output OFF
-//   Press 3: exit manual override,  controlLoop() resumes
-// (i.e. first press = manual ON, second = manual OFF, third = back to auto)
+// Center button cycles:
+//   auto          -> manual ON  ("ON"  shown)
+//   manual ON     -> manual OFF ("OFF" shown)
+//   manual OFF    -> auto       (blank)
 //
 void updateButtons() {
   unsigned long now = millis();
@@ -313,18 +314,15 @@ void updateButtons() {
 
           if (i == 2) {
             if (!manualOverride) {
-              // Enter manual override, force ON
               manualOverride = true;
               outputOn       = true;
               digitalWrite(PIN_MOSFET, HIGH);
               DBGLN("Manual ON");
             } else if (outputOn) {
-              // Already in manual override and ON -> turn OFF
               outputOn = false;
               digitalWrite(PIN_MOSFET, LOW);
               DBGLN("Manual OFF");
             } else {
-              // In manual override and OFF -> exit back to auto
               manualOverride = false;
               DBGLN("Auto mode");
             }
@@ -430,13 +428,13 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    String j = "{\"temp\":"          + String(currentTemp,    1)
-             + ",\"setpoint\":"     + String(setpoint,        1)
-             + ",\"output\":"       + String(outputOn ? 1 : 0)
-             + ",\"manual\":"       + String(manualOverride ? 1 : 0)
-             + ",\"hysteresis\":"   + String(hysteresis,      1)
-             + ",\"offset\":"       + String(probeOffset,     1)
-             + ",\"probeType\":"    + String(probeType)
+    String j = "{\"temp\":"        + String(currentTemp,    1)
+             + ",\"setpoint\":"   + String(setpoint,        1)
+             + ",\"output\":"     + String(outputOn ? 1 : 0)
+             + ",\"manual\":"     + String(manualOverride ? 1 : 0)
+             + ",\"hysteresis\":" + String(hysteresis,      1)
+             + ",\"offset\":"     + String(probeOffset,     1)
+             + ",\"probeType\":"  + String(probeType)
              + "}";
     server.send(200, "application/json", j);
   });
