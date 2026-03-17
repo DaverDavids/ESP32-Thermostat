@@ -49,8 +49,9 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 const uint32_t SAMPLE_MS  = 1000;
 const uint32_t DISPLAY_MS =   10;
 
-// ─── Button debounce ──────────────────────────────────────────────────────────
-const uint32_t DEBOUNCE_MS = 30;
+// ─── Button debounce / long-press ──────────────────────────────────────────────
+const uint32_t DEBOUNCE_MS      =   30;
+const uint32_t CTR_LONGPRESS_MS = 2000;  // hold time to change state
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  200;
@@ -72,7 +73,7 @@ float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
 bool     outputOn       = false;  // relay off at boot
 bool     apMode         = false;
-bool     manualOverride = true;   // boot into manual OFF; auto never runs until user enables it
+bool     manualOverride = true;   // boot into manual OFF
 
 float    probeOffset =  0.0f;
 float    hysteresis  =  5.0f;
@@ -117,7 +118,7 @@ void setup() {
   delay(200);
 
   pinMode(PIN_MOSFET, OUTPUT);
-  MOSFET_WRITE(false);  // active-low: HIGH = off at boot
+  MOSFET_WRITE(false);
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
@@ -237,35 +238,58 @@ void loop() {
 }
 
 // ─── Display ──────────────────────────────────────────────────────────────────
+//
+// Numbers: setTextSize(3) = 18px wide x 24px tall, y=4  (fills 28/32px)
+// Label:   setTextSize(1) = 6px wide  x 8px  tall, y=12 (vertically centered)
+//
+// Pixel budget (128px wide):
+//   Temp  right-edge  x=54  (3 digits x 18 = 54px, starts x=0)
+//   Gap                     20px  (x=54..74)
+//   Label left-edge   x=55  ON=12px, OFF=18px  ✓
+//   Setpoint left     x=74  (3 digits x 18 = 54px, ends x=128)  ✓
+//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
 
-  const int Y       =  8;
-  const int CW      = 12;
-  const int T_REDGE = 42;
-  const int LBL_X   = 46;
-  const int SP_X    = 86;
+  const int NUM_Y   =  4;   // size-3 numbers top
+  const int LBL_Y   = 12;   // size-1 label top (vertically centered in 32px)
+  const int NUM_CW  = 18;   // size-3 char width
+  const int T_REDGE = 54;   // right edge of temp field
+  const int LBL_X   = 55;   // left edge of label
+  const int SP_X    = 74;   // left edge of setpoint
 
+  // ─ Temp: size 3, right-aligned
+  display.setTextSize(3);
   String tempStr = String((int)round(currentTemp));
-  int tempX = T_REDGE - (int)(tempStr.length()) * CW;
+  int tempX = T_REDGE - (int)tempStr.length() * NUM_CW;
   if (tempX < 0) tempX = 0;
-  display.setCursor(tempX, Y);
+  display.setCursor(tempX, NUM_Y);
   display.print(tempStr);
 
+  // ─ Center label: size 1, only in manual override
   if (manualOverride) {
-    display.setCursor(LBL_X, Y);
+    display.setTextSize(1);
+    display.setCursor(LBL_X, LBL_Y);
     display.print(outputOn ? "ON" : "OFF");
   }
 
-  display.setCursor(SP_X, Y);
+  // ─ Setpoint: size 3, left-aligned
+  display.setTextSize(3);
+  display.setCursor(SP_X, NUM_Y);
   display.print((int)round(setpoint));
 
   display.display();
 }
 
 // ─── Button handling ──────────────────────────────────────────────────────────
+//
+// UP / DN: short press + hold ramps setpoint (unchanged)
+// CENTER:  must hold CTR_LONGPRESS_MS (2s) to change state
+//   manual OFF -> manual ON
+//   manual ON  -> manual OFF
+//   manual OFF -> auto
+//
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
@@ -287,34 +311,38 @@ void updateButtons() {
           btns[i].phase           = BTN_HELD;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
-          btns[i].nextFire        = now + RAMP_DELAY_MS;
+          // UP/DN fire immediately after ramp delay; CENTER waits for long press
+          btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
 
+          // UP / DN: first step on confirm
           if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
           if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
-
-          if (i == 2) {
-            if (!manualOverride) {
-              manualOverride = true;
-              outputOn       = true;
-              MOSFET_WRITE(true);
-              DBGLN("Manual ON");
-            } else if (outputOn) {
-              outputOn = false;
-              MOSFET_WRITE(false);
-              DBGLN("Manual OFF");
-            } else {
-              manualOverride = false;
-              DBGLN("Auto mode");
-            }
-          }
+          // CENTER: action deferred until nextFire (long press)
         }
         break;
 
       case BTN_HELD:
         if (!low) {
+          // released before long press fired for center
           btns[i].phase           = BTN_IDLE;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
+        } else if (i == 2 && now >= btns[i].nextFire) {
+          // CENTER long press fired
+          btns[i].nextFire = ULONG_MAX;  // prevent re-fire while still held
+          if (!manualOverride) {
+            manualOverride = true;
+            outputOn       = true;
+            MOSFET_WRITE(true);
+            DBGLN("Manual ON");
+          } else if (outputOn) {
+            outputOn = false;
+            MOSFET_WRITE(false);
+            DBGLN("Manual OFF");
+          } else {
+            manualOverride = false;
+            DBGLN("Auto mode");
+          }
         }
         break;
     }
