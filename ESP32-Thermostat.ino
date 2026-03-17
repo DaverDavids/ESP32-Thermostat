@@ -23,16 +23,19 @@
 
 // ─── Pin assignments — change here if you rewire ──────────────────────────────────────
 const uint8_t PIN_MOSFET  =  3;
-const uint8_t PIN_SDA     =  8;   // I2C SDA (INA219 + OLED shared)
-const uint8_t PIN_SCL     =  9;   // I2C SCL
-const uint8_t PIN_BTN_UP  =  4;   // 3-way switch UP
-const uint8_t PIN_BTN_DN  =  5;   // 3-way switch DOWN
-const uint8_t PIN_BTN_CTR =  6;   // 3-way switch CENTER (manual toggle)
+const uint8_t PIN_SDA     =  8;
+const uint8_t PIN_SCL     =  9;
+const uint8_t PIN_BTN_UP  =  4;
+const uint8_t PIN_BTN_DN  =  5;
+const uint8_t PIN_BTN_CTR =  6;
 
 // ─── OLED ───────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
-const uint8_t  OLED_H    =  64;
+const uint8_t  OLED_H    =  32;   // <-- 32 tall
 const uint8_t  OLED_ADDR = 0x3C;
+
+// How long to show IP on startup (ms)
+const uint32_t IP_SPLASH_MS = 4000;
 
 // ─── WiFi ───────────────────────────────────────────────────────────────────────
 const char*    HOSTNAME        = "thermostat";
@@ -81,6 +84,7 @@ uint16_t histCount = 0;
 unsigned long lastSample        = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
+unsigned long bootTime          = 0;   // set after WiFi connects
 
 struct BtnState {
   uint8_t  pin;
@@ -123,9 +127,9 @@ void setup() {
   } else {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(2);
-    display.setCursor(4, 24);
-    display.print("Thermostat");
+    display.setTextSize(1);
+    display.setCursor(0, 12);
+    display.print("  Thermostat...");
     display.display();
     DBGLN("OLED ready");
   }
@@ -140,6 +144,24 @@ void setup() {
     delay(250); DBG(".");
   }
   WiFi.status() == WL_CONNECTED ? onWifiConnect() : (DBGLN("\nSTA timeout"), startAP());
+
+  // Show IP splash immediately after WiFi is up
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 4);
+  if (apMode) {
+    display.print(" AP: Thermostat-Setup");
+    display.setCursor(0, 16);
+    display.print(" pw: configure");
+  } else {
+    display.print(" IP: ");
+    display.print(WiFi.localIP());
+    display.setCursor(0, 16);
+    display.print(" thermostat.local");
+  }
+  display.display();
+  bootTime = millis();   // splash timer starts now
 
   setupOTA();
   setupRoutes();
@@ -207,83 +229,52 @@ void loop() {
 
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
-    updateDisplay();
+    // Don't update display during IP splash
+    if (now - bootTime >= IP_SPLASH_MS) {
+      updateDisplay();
+    }
   }
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────────
 //
-// Pixel layout (128 wide x 64 tall):
+// 128x32 layout, all size-2 text (each char 12w x 16h, centered y=8):
 //
-//  y=0  [─TEMP───────────────────────────|─SET────────────────────────────]
-//  y=10 [  XXX  (size-3 integer)   |  XXX  (size-3 integer)              ]
-//  y=34 [  .X°C (size-1 decimal)   |  °C                                 ]
-//  y=46 [────────────────────────────────────────────────────────────────]
-//  y=48 [  IP or AP name (size-1)                                        ]
+//  [ 423  ->  500 ]   output ON:  arrow shown
+//  [ 423      500 ]   output OFF: arrow hidden
 //
-// When outputOn: 4px solid filled border around screen edges,
-// drawn BEFORE text so text renders on top of it unclipped.
+// Numbers are right-aligned within their half so they don't jump
+// around as digit count changes.
+//
+// Size-2 char = 12px wide, 16px tall.
+// Left number  right-edge at x=52  (fits up to 4 digits = 48px, starts x=4)
+// Arrow ">"    centered   at x=60  (12px wide, x=60..71)
+// Right number left-edge  at x=76  (fits up to 4 digits = 48px, ends x=124)
+// All text y=8  (centers 16px text in 32px screen)
 //
 void updateDisplay() {
   display.clearDisplay();
-
-  // ─ Output ON border: drawn first, text goes on top
-  if (outputOn) {
-    // Fill 4px border by drawing 4 filled rectangles along each edge
-    display.fillRect(0, 0, OLED_W, 4, SSD1306_WHITE);   // top
-    display.fillRect(0, OLED_H-4, OLED_W, 4, SSD1306_WHITE); // bottom
-    display.fillRect(0, 0, 4, OLED_H, SSD1306_WHITE);   // left
-    display.fillRect(OLED_W-4, 0, 4, OLED_H, SSD1306_WHITE); // right
-  }
-
-  // ─ Vertical divider (x=63, from top to separator line)
-  display.drawFastVLine(63, 0, 45, SSD1306_WHITE);
-
-  // ─ Horizontal separator above WiFi row
-  display.drawFastHLine(0, 46, OLED_W, SSD1306_WHITE);
-
-  // ─ Left side: TEMP
-  // Label
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(4, 1);
-  display.print("TEMP");
+  display.setTextSize(2);
 
-  // Integer part - size 3 (each char = 18px wide, 24px tall)
-  display.setTextSize(3);
-  display.setCursor(4, 10);
-  display.print((int)currentTemp);
+  // ─ Left: current temp, right-aligned in left half (x 0..62)
+  // Measure width to right-align: each digit + '-' = 12px, decimal point = 12px
+  String tempStr = String((int)round(currentTemp));
+  int tempW = tempStr.length() * 12;
+  int tempX = 52 - tempW;           // right-align with right edge at x=52
+  if (tempX < 0) tempX = 0;        // clamp if 4+ digits
+  display.setCursor(tempX, 8);
+  display.print(tempStr);
 
-  // Decimal + unit - size 1 below
-  display.setTextSize(1);
-  display.setCursor(4, 35);
-  display.print(".");
-  display.print((int)(fabs(currentTemp - (int)currentTemp) * 10));
-  display.print((char)247);  // degree
-  display.print("C");
-
-  // ─ Right side: SET
-  display.setTextSize(1);
-  display.setCursor(67, 1);
-  display.print("SET");
-
-  display.setTextSize(3);
-  display.setCursor(67, 10);
-  display.print((int)setpoint);
-
-  display.setTextSize(1);
-  display.setCursor(67, 35);
-  display.print((char)247);
-  display.print("C");
-
-  // ─ Bottom WiFi row
-  display.setTextSize(1);
-  display.setCursor(4, 50);
-  if (apMode) {
-    display.print("AP: Setup");
-  } else {
-    display.print(WiFi.localIP());
+  // ─ Center: arrow only when output is ON
+  if (outputOn) {
+    display.setCursor(58, 8);
+    display.print(">");             // simple arrow, 12px wide
   }
+
+  // ─ Right: setpoint, left-aligned in right half starting x=76
+  display.setCursor(76, 8);
+  display.print((int)round(setpoint));
 
   display.display();
 }
