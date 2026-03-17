@@ -31,10 +31,9 @@ const uint8_t PIN_BTN_CTR =  6;
 
 // ─── OLED ───────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
-const uint8_t  OLED_H    =  32;   // <-- 32 tall
+const uint8_t  OLED_H    =  32;
 const uint8_t  OLED_ADDR = 0x3C;
 
-// How long to show IP on startup (ms)
 const uint32_t IP_SPLASH_MS = 4000;
 
 // ─── WiFi ───────────────────────────────────────────────────────────────────────
@@ -84,7 +83,7 @@ uint16_t histCount = 0;
 unsigned long lastSample        = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
-unsigned long bootTime          = 0;   // set after WiFi connects
+unsigned long bootTime          = 0;
 
 struct BtnState {
   uint8_t  pin;
@@ -145,7 +144,7 @@ void setup() {
   }
   WiFi.status() == WL_CONNECTED ? onWifiConnect() : (DBGLN("\nSTA timeout"), startAP());
 
-  // Show IP splash immediately after WiFi is up
+  // IP splash
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -161,7 +160,7 @@ void setup() {
     display.print(" thermostat.local");
   }
   display.display();
-  bootTime = millis();   // splash timer starts now
+  bootTime = millis();
 
   setupOTA();
   setupRoutes();
@@ -229,7 +228,6 @@ void loop() {
 
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
-    // Don't update display during IP splash
     if (now - bootTime >= IP_SPLASH_MS) {
       updateDisplay();
     }
@@ -238,42 +236,46 @@ void loop() {
 
 // ─── Display ────────────────────────────────────────────────────────────────────
 //
-// 128x32 layout, all size-2 text (each char 12w x 16h, centered y=8):
+// setTextSize(3): each char is 18px wide x 24px tall
+// Screen is 128 x 32px
+// y=4 centers 24px text vertically (4px top + 24px + 4px bottom)
 //
-//  [ 423  ->  500 ]   output ON:  arrow shown
-//  [ 423      500 ]   output OFF: arrow hidden
+// Layout:
+//   Left number  (temp)     right-aligned, right edge at x=56
+//   Arrow ">"               at x=60, only shown when outputOn
+//   Right number (setpoint) left-aligned,  left  edge at x=78
 //
-// Numbers are right-aligned within their half so they don't jump
-// around as digit count changes.
-//
-// Size-2 char = 12px wide, 16px tall.
-// Left number  right-edge at x=52  (fits up to 4 digits = 48px, starts x=4)
-// Arrow ">"    centered   at x=60  (12px wide, x=60..71)
-// Right number left-edge  at x=76  (fits up to 4 digits = 48px, ends x=124)
-// All text y=8  (centers 16px text in 32px screen)
+// Max 3-digit temp  = 3*18 = 54px  -> starts at x=2,  fits fine
+// Max 4-digit temp  = 4*18 = 72px  -> starts at x=-16, clamp to 0
+// Arrow ">" = 18px wide, x=60..77
+// Max 4-digit setpoint = 72px -> ends at x=150, clips at 128 (very rare >999)
 //
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(2);
+  display.setTextSize(3);
 
-  // ─ Left: current temp, right-aligned in left half (x 0..62)
-  // Measure width to right-align: each digit + '-' = 12px, decimal point = 12px
+  const int Y       = 4;   // top of text row
+  const int CHAR_W  = 18;  // size-3 char width
+  const int R_EDGE  = 56;  // right edge of left number
+  const int ARROW_X = 60;  // x of arrow character
+  const int SP_X    = 78;  // left edge of setpoint number
+
+  // ─ Left: current temp, right-aligned
   String tempStr = String((int)round(currentTemp));
-  int tempW = tempStr.length() * 12;
-  int tempX = 52 - tempW;           // right-align with right edge at x=52
-  if (tempX < 0) tempX = 0;        // clamp if 4+ digits
-  display.setCursor(tempX, 8);
+  int tempX = R_EDGE - (tempStr.length() * CHAR_W);
+  if (tempX < 0) tempX = 0;
+  display.setCursor(tempX, Y);
   display.print(tempStr);
 
-  // ─ Center: arrow only when output is ON
+  // ─ Center: arrow when ON
   if (outputOn) {
-    display.setCursor(58, 8);
-    display.print(">");             // simple arrow, 12px wide
+    display.setCursor(ARROW_X, Y);
+    display.print(">");
   }
 
-  // ─ Right: setpoint, left-aligned in right half starting x=76
-  display.setCursor(76, 8);
+  // ─ Right: setpoint, left-aligned
+  display.setCursor(SP_X, Y);
   display.print((int)round(setpoint));
 
   display.display();
