@@ -49,9 +49,9 @@ const uint32_t DISPLAY_MS =  200;
 const uint32_t DEBOUNCE_MS = 30;
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
-const uint32_t RAMP_DELAY_MS        =  400;
-const uint32_t RAMP_RATE_INITIAL_MS =  200;
-const uint32_t RAMP_RATE_MIN_MS     =   10;
+const uint32_t RAMP_DELAY_MS        =  200;
+const uint32_t RAMP_RATE_INITIAL_MS =  100;
+const uint32_t RAMP_RATE_MIN_MS     =   1;
 const float    RAMP_ACCEL           = 0.85f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          = 1.0f;
