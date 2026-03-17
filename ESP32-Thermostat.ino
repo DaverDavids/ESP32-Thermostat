@@ -38,23 +38,20 @@ const uint8_t  OLED_ADDR = 0x3C;
 const char*    HOSTNAME        = "thermostat";
 const uint32_t WIFI_TIMEOUT_MS =  20000;
 const uint32_t WIFI_RETRY_MS   = 300000;
-#define        WIFI_TX_POWER     WIFI_POWER_8_5dBm  // C3 Supermini antenna fix
+#define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ─────────────────────────────────────────────────────────────────────
-const uint32_t SAMPLE_MS  = 5000;  // thermocouple read interval
-const uint32_t DISPLAY_MS =  200;  // OLED refresh interval
+const uint32_t SAMPLE_MS  = 5000;
+const uint32_t DISPLAY_MS =  200;
 
 // ─── Setpoint ramp (hold-to-accelerate) ───────────────────────────────────────────
-// First tick fires immediately on press. After RAMP_DELAY_MS the repeat
-// starts at RAMP_RATE_INITIAL_MS and accelerates each tick by RAMP_ACCEL
-// (multiplier <1 = faster), floored at RAMP_RATE_MIN_MS.
-const uint32_t RAMP_DELAY_MS        =  400;  // pause before auto-repeat begins
-const uint32_t RAMP_RATE_INITIAL_MS =  200;  // first repeat interval (ms)
-const uint32_t RAMP_RATE_MIN_MS     =   30;  // fastest allowed repeat interval
-const float    RAMP_ACCEL           = 0.85f; // multiply interval each tick (0.85 = 15% faster each step)
-const float    SP_STEP_INITIAL      =  5.0f; // deg C per tick at start
-const float    SP_STEP_MAX          = 50.0f; // deg C per tick at full speed
-const float    SP_STEP_ACCEL        = 1.15f; // multiply step size each tick
+const uint32_t RAMP_DELAY_MS        =  400;
+const uint32_t RAMP_RATE_INITIAL_MS =  200;
+const uint32_t RAMP_RATE_MIN_MS     =   30;
+const float    RAMP_ACCEL           = 0.85f;
+const float    SP_STEP_INITIAL      =  5.0f;
+const float    SP_STEP_MAX          = 50.0f;
+const float    SP_STEP_ACCEL        = 1.15f;
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
@@ -70,7 +67,7 @@ bool     apMode      = false;
 
 float    probeOffset =  0.0f;
 float    hysteresis  =  5.0f;
-int      probeType   =  0;      // 0=K, 1=J
+int      probeType   =  0;
 String   savedSSID   = MYSSID;
 String   savedPSK    = MYPSK;
 
@@ -85,15 +82,14 @@ unsigned long lastSample        = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 
-// Per-button ramp state
 struct BtnState {
   uint8_t  pin;
   bool     lastRaw;
   bool     held;
   unsigned long downAt;
   unsigned long nextFire;
-  float    currentInterval;  // ms, shrinks as you hold
-  float    currentStep;      // deg C, grows as you hold
+  float    currentInterval;
+  float    currentStep;
 } btns[3];
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
@@ -128,8 +124,8 @@ void setup() {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     display.setTextSize(2);
-    display.setCursor(10, 20);
-    display.println("Thermostat");
+    display.setCursor(4, 24);
+    display.print("Thermostat");
     display.display();
     DBGLN("OLED ready");
   }
@@ -160,7 +156,6 @@ void loop() {
 
   unsigned long now = millis();
 
-  // UP button: accelerating setpoint raise
   if (btns[0].held && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
     btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
@@ -169,7 +164,6 @@ void loop() {
     savePrefs();
   }
 
-  // DOWN button: accelerating setpoint lower
   if (btns[1].held && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
     btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
@@ -178,14 +172,12 @@ void loop() {
     savePrefs();
   }
 
-  // CENTER: single-fire manual output toggle (no repeat)
   if (!btns[2].lastRaw && !digitalRead(PIN_BTN_CTR)) {
     outputOn = !outputOn;
     digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
     DBGLN("Manual toggle");
   }
 
-  // Background WiFi retry
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
     lastWifiRetry = now;
     WiFi.disconnect(true); delay(100);
@@ -203,7 +195,6 @@ void loop() {
     }
   }
 
-  // Temperature sample
   if (now - lastSample >= SAMPLE_MS) {
     lastSample = now;
     currentTemp = readTempC();
@@ -214,7 +205,6 @@ void loop() {
     controlLoop();
   }
 
-  // Display refresh
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
     updateDisplay();
@@ -222,51 +212,77 @@ void loop() {
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────────
+//
+// Pixel layout (128 wide x 64 tall):
+//
+//  y=0  [─TEMP───────────────────────────|─SET────────────────────────────]
+//  y=10 [  XXX  (size-3 integer)   |  XXX  (size-3 integer)              ]
+//  y=34 [  .X°C (size-1 decimal)   |  °C                                 ]
+//  y=46 [────────────────────────────────────────────────────────────────]
+//  y=48 [  IP or AP name (size-1)                                        ]
+//
+// When outputOn: 4px solid filled border around screen edges,
+// drawn BEFORE text so text renders on top of it unclipped.
+//
 void updateDisplay() {
   display.clearDisplay();
 
-  // ─ Divider
-  display.drawFastVLine(63, 0, 52, SSD1306_WHITE);
-
-  // ─ Left: current temp
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.print("TEMP");
-  display.setTextSize(2);
-  display.setCursor(0, 12);
-  display.print((int)currentTemp);
-  display.setTextSize(1);
-  display.setCursor(0, 36);
-  display.print(".");
-  display.print((int)(fabs(currentTemp - (int)currentTemp) * 10));
-  display.print((char)247); display.print("C");
-
-  // ─ Right: setpoint
-  display.setTextSize(1);
-  display.setCursor(67, 0);
-  display.print("SET");
-  display.setTextSize(2);
-  display.setCursor(67, 12);
-  display.print((int)setpoint);
-  display.setTextSize(1);
-  display.setCursor(67, 36);
-  display.print((char)247); display.print("C");
-
-  // ─ Bottom: WiFi
-  display.setTextSize(1);
-  display.setCursor(0, 54);
-  if (apMode) {
-    display.print("AP:Thermostat-Setup");
-  } else {
-    display.print(WiFi.localIP());
+  // ─ Output ON border: drawn first, text goes on top
+  if (outputOn) {
+    // Fill 4px border by drawing 4 filled rectangles along each edge
+    display.fillRect(0, 0, OLED_W, 4, SSD1306_WHITE);   // top
+    display.fillRect(0, OLED_H-4, OLED_W, 4, SSD1306_WHITE); // bottom
+    display.fillRect(0, 0, 4, OLED_H, SSD1306_WHITE);   // left
+    display.fillRect(OLED_W-4, 0, 4, OLED_H, SSD1306_WHITE); // right
   }
 
-  // ─ Output ON: thick inverted border
-  if (outputOn) {
-    for (int i = 0; i < 3; i++) {
-      display.drawRect(i, i, OLED_W - 2*i, OLED_H - 2*i, SSD1306_INVERSE);
-    }
+  // ─ Vertical divider (x=63, from top to separator line)
+  display.drawFastVLine(63, 0, 45, SSD1306_WHITE);
+
+  // ─ Horizontal separator above WiFi row
+  display.drawFastHLine(0, 46, OLED_W, SSD1306_WHITE);
+
+  // ─ Left side: TEMP
+  // Label
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(4, 1);
+  display.print("TEMP");
+
+  // Integer part - size 3 (each char = 18px wide, 24px tall)
+  display.setTextSize(3);
+  display.setCursor(4, 10);
+  display.print((int)currentTemp);
+
+  // Decimal + unit - size 1 below
+  display.setTextSize(1);
+  display.setCursor(4, 35);
+  display.print(".");
+  display.print((int)(fabs(currentTemp - (int)currentTemp) * 10));
+  display.print((char)247);  // degree
+  display.print("C");
+
+  // ─ Right side: SET
+  display.setTextSize(1);
+  display.setCursor(67, 1);
+  display.print("SET");
+
+  display.setTextSize(3);
+  display.setCursor(67, 10);
+  display.print((int)setpoint);
+
+  display.setTextSize(1);
+  display.setCursor(67, 35);
+  display.print((char)247);
+  display.print("C");
+
+  // ─ Bottom WiFi row
+  display.setTextSize(1);
+  display.setCursor(4, 50);
+  if (apMode) {
+    display.print("AP: Setup");
+  } else {
+    display.print(WiFi.localIP());
   }
 
   display.display();
@@ -331,7 +347,7 @@ void onWifiConnect() {
   DBG("\nIP: "); DBGLN(WiFi.localIP());
   MDNS.end();
   if (MDNS.begin(HOSTNAME)) {
-    DBGLN(String("mDNS: ") + HOSTNAME + ".local");  // runtime concat, not literal
+    DBGLN(String("mDNS: ") + HOSTNAME + ".local");
   }
 }
 
