@@ -33,7 +33,6 @@ const uint8_t PIN_BTN_CTR =  6;
 const uint8_t  OLED_W    = 128;
 const uint8_t  OLED_H    =  32;
 const uint8_t  OLED_ADDR = 0x3C;
-
 const uint32_t IP_SPLASH_MS = 4000;
 
 // ─── WiFi ───────────────────────────────────────────────────────────────────────
@@ -45,6 +44,11 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 // ─── Timing ─────────────────────────────────────────────────────────────────────
 const uint32_t SAMPLE_MS  = 5000;
 const uint32_t DISPLAY_MS =  200;
+
+// ─── Button debounce ───────────────────────────────────────────────────────────────
+// Pin must read LOW continuously for DEBOUNCE_MS before a press is accepted.
+// Raise this if you still get false triggers; lower it if response feels sluggish.
+const uint32_t DEBOUNCE_MS = 30;
 
 // ─── Setpoint ramp (hold-to-accelerate) ───────────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  400;
@@ -85,14 +89,25 @@ unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
 
+// ─── Button state ─────────────────────────────────────────────────────────────────
+//
+// State machine per button:
+//   IDLE     -> pin high (released)
+//   PENDING  -> pin went low, waiting for DEBOUNCE_MS of stable LOW
+//   HELD     -> debounce confirmed, button is genuinely pressed
+//
+// A press only registers once debounce is confirmed (IDLE->PENDING->HELD).
+// Any HIGH reading during PENDING cancels back to IDLE (noise rejection).
+//
+enum BtnPhase { IDLE, PENDING, HELD };
+
 struct BtnState {
-  uint8_t  pin;
-  bool     lastRaw;
-  bool     held;
-  unsigned long downAt;
-  unsigned long nextFire;
-  float    currentInterval;
-  float    currentStep;
+  uint8_t   pin;
+  BtnPhase  phase;
+  unsigned long pendingSince;   // when we first saw LOW
+  unsigned long nextFire;       // next ramp tick timestamp
+  float     currentInterval;   // ms between ramp ticks, shrinks over time
+  float     currentStep;       // deg C per tick, grows over time
 } btns[3];
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
@@ -112,7 +127,7 @@ void setup() {
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
-    btns[i] = { btnPins[i], true, false, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
+    btns[i] = { btnPins[i], IDLE, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
     pinMode(btnPins[i], INPUT_PULLUP);
   }
 
@@ -144,7 +159,6 @@ void setup() {
   }
   WiFi.status() == WL_CONNECTED ? onWifiConnect() : (DBGLN("\nSTA timeout"), startAP());
 
-  // IP splash
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -177,7 +191,8 @@ void loop() {
 
   unsigned long now = millis();
 
-  if (btns[0].held && now >= btns[0].nextFire) {
+  // UP: ramp while held
+  if (btns[0].phase == HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
     btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
     btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
@@ -185,7 +200,8 @@ void loop() {
     savePrefs();
   }
 
-  if (btns[1].held && now >= btns[1].nextFire) {
+  // DOWN: ramp while held
+  if (btns[1].phase == HELD && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
     btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
     btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
@@ -193,11 +209,8 @@ void loop() {
     savePrefs();
   }
 
-  if (!btns[2].lastRaw && !digitalRead(PIN_BTN_CTR)) {
-    outputOn = !outputOn;
-    digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
-    DBGLN("Manual toggle");
-  }
+  // CENTER: toggle on confirmed press (rising edge of HELD)
+  // handled inside updateButtons() via a one-shot flag — see below
 
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
     lastWifiRetry = now;
@@ -235,46 +248,28 @@ void loop() {
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────────
-//
-// setTextSize(3): each char is 18px wide x 24px tall
-// Screen is 128 x 32px
-// y=4 centers 24px text vertically (4px top + 24px + 4px bottom)
-//
-// Layout:
-//   Left number  (temp)     right-aligned, right edge at x=56
-//   Arrow ">"               at x=60, only shown when outputOn
-//   Right number (setpoint) left-aligned,  left  edge at x=78
-//
-// Max 3-digit temp  = 3*18 = 54px  -> starts at x=2,  fits fine
-// Max 4-digit temp  = 4*18 = 72px  -> starts at x=-16, clamp to 0
-// Arrow ">" = 18px wide, x=60..77
-// Max 4-digit setpoint = 72px -> ends at x=150, clips at 128 (very rare >999)
-//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(3);
 
-  const int Y       = 4;   // top of text row
-  const int CHAR_W  = 18;  // size-3 char width
-  const int R_EDGE  = 56;  // right edge of left number
-  const int ARROW_X = 60;  // x of arrow character
-  const int SP_X    = 78;  // left edge of setpoint number
+  const int Y       = 4;
+  const int CHAR_W  = 18;
+  const int R_EDGE  = 56;
+  const int ARROW_X = 60;
+  const int SP_X    = 78;
 
-  // ─ Left: current temp, right-aligned
   String tempStr = String((int)round(currentTemp));
   int tempX = R_EDGE - (tempStr.length() * CHAR_W);
   if (tempX < 0) tempX = 0;
   display.setCursor(tempX, Y);
   display.print(tempStr);
 
-  // ─ Center: arrow when ON
   if (outputOn) {
     display.setCursor(ARROW_X, Y);
     display.print(">");
   }
 
-  // ─ Right: setpoint, left-aligned
   display.setCursor(SP_X, Y);
   display.print((int)round(setpoint));
 
@@ -282,21 +277,61 @@ void updateDisplay() {
 }
 
 // ─── Button handling ──────────────────────────────────────────────────────────────
+//
+// State machine:
+//   IDLE:    pin HIGH  -> stay IDLE
+//            pin LOW   -> record pendingSince, go PENDING
+//   PENDING: pin HIGH  -> noise, back to IDLE  (this is the key rejection step)
+//            pin LOW and elapsed < DEBOUNCE_MS -> wait
+//            pin LOW and elapsed >= DEBOUNCE_MS -> confirmed! go HELD, fire first tick
+//   HELD:    pin HIGH  -> release, back to IDLE, reset ramp
+//            pin LOW   -> stay HELD (ramp ticks handled in loop())
+//
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
-    bool raw = !digitalRead(btns[i].pin);
-    if (raw && !btns[i].lastRaw) {
-      btns[i].held            = true;
-      btns[i].downAt          = now;
-      btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
-      btns[i].currentStep     = SP_STEP_INITIAL;
-      btns[i].nextFire        = now + RAMP_DELAY_MS;
-      if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
-      if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
+    bool low = !digitalRead(btns[i].pin);  // true = pressed (active low)
+
+    switch (btns[i].phase) {
+
+      case IDLE:
+        if (low) {
+          btns[i].phase        = PENDING;
+          btns[i].pendingSince = now;
+        }
+        break;
+
+      case PENDING:
+        if (!low) {
+          // Glitch — wasn't held long enough, ignore
+          btns[i].phase = IDLE;
+        } else if (now - btns[i].pendingSince >= DEBOUNCE_MS) {
+          // Stable LOW for DEBOUNCE_MS: it's a real press
+          btns[i].phase           = HELD;
+          btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
+          btns[i].currentStep     = SP_STEP_INITIAL;
+          btns[i].nextFire        = now + RAMP_DELAY_MS;
+          // Fire first tick immediately for UP/DOWN
+          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
+          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
+          // CENTER: toggle output on confirmed press
+          if (i == 2) {
+            outputOn = !outputOn;
+            digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
+            DBGLN("Manual toggle");
+          }
+        }
+        break;
+
+      case HELD:
+        if (!low) {
+          // Released — reset ramp state
+          btns[i].phase           = IDLE;
+          btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
+          btns[i].currentStep     = SP_STEP_INITIAL;
+        }
+        break;
     }
-    if (!raw) btns[i].held = false;
-    btns[i].lastRaw = raw;
   }
 }
 
