@@ -48,13 +48,13 @@ const uint32_t DISPLAY_MS =  200;  // OLED refresh interval
 // First tick fires immediately on press. After RAMP_DELAY_MS the repeat
 // starts at RAMP_RATE_INITIAL_MS and accelerates each tick by RAMP_ACCEL
 // (multiplier <1 = faster), floored at RAMP_RATE_MIN_MS.
-const uint32_t RAMP_DELAY_MS       =  400;  // pause before auto-repeat begins
-const uint32_t RAMP_RATE_INITIAL_MS=  200;  // first repeat interval (ms)
-const uint32_t RAMP_RATE_MIN_MS    =   30;  // fastest allowed repeat interval
-const float    RAMP_ACCEL          = 0.85f; // multiply interval each tick (0.85 = 15% faster each step)
-const float    SP_STEP_INITIAL     =  5.0f; // deg C per tick at start
-const float    SP_STEP_MAX         = 50.0f; // deg C per tick at full speed
-const float    SP_STEP_ACCEL       = 1.15f; // multiply step size each tick
+const uint32_t RAMP_DELAY_MS        =  400;  // pause before auto-repeat begins
+const uint32_t RAMP_RATE_INITIAL_MS =  200;  // first repeat interval (ms)
+const uint32_t RAMP_RATE_MIN_MS     =   30;  // fastest allowed repeat interval
+const float    RAMP_ACCEL           = 0.85f; // multiply interval each tick (0.85 = 15% faster each step)
+const float    SP_STEP_INITIAL      =  5.0f; // deg C per tick at start
+const float    SP_STEP_MAX          = 50.0f; // deg C per tick at full speed
+const float    SP_STEP_ACCEL        = 1.15f; // multiply step size each tick
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
@@ -81,9 +81,9 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
-unsigned long lastSample       = 0;
-unsigned long lastWifiRetry    = 0;
-unsigned long lastDisplayUpdate= 0;
+unsigned long lastSample        = 0;
+unsigned long lastWifiRetry     = 0;
+unsigned long lastDisplayUpdate = 0;
 
 // Per-button ramp state
 struct BtnState {
@@ -119,7 +119,7 @@ void setup() {
 
   Wire.begin(PIN_SDA, PIN_SCL);
 
-  if (!ina219.begin())               { DBGLN("INA219 not found"); }
+  if (!ina219.begin()) { DBGLN("INA219 not found"); }
   else { ina219.setCalibration_32V_2A(); DBGLN("INA219 ready"); }
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
@@ -179,7 +179,7 @@ void loop() {
   }
 
   // CENTER: single-fire manual output toggle (no repeat)
-  if (!btns[2].lastRaw && !digitalRead(PIN_BTN_CTR)) {  // fresh press only
+  if (!btns[2].lastRaw && !digitalRead(PIN_BTN_CTR)) {
     outputOn = !outputOn;
     digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
     DBGLN("Manual toggle");
@@ -222,27 +222,19 @@ void loop() {
 }
 
 // ─── Display ────────────────────────────────────────────────────────────────────
-// Layout (128x64):
-//  Left half (0-61):  current temp, big text
-//  Right half (67-127): setpoint, big text
-//  Divider: vertical line at x=63
-//  Bottom row (y=52-63): WiFi status small text
-//  When output ON: thick inverted border (3px) drawn around entire screen
 void updateDisplay() {
   display.clearDisplay();
 
   // ─ Divider
   display.drawFastVLine(63, 0, 52, SSD1306_WHITE);
 
-  // ─ Left: current temp label + value
+  // ─ Left: current temp
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.print("TEMP");
-
   display.setTextSize(2);
   display.setCursor(0, 12);
-  // Fit: 999.9 = 5 chars @ size2 = 60px wide, tight but ok
   display.print((int)currentTemp);
   display.setTextSize(1);
   display.setCursor(0, 36);
@@ -250,11 +242,10 @@ void updateDisplay() {
   display.print((int)(fabs(currentTemp - (int)currentTemp) * 10));
   display.print((char)247); display.print("C");
 
-  // ─ Right: setpoint label + value
+  // ─ Right: setpoint
   display.setTextSize(1);
   display.setCursor(67, 0);
   display.print("SET");
-
   display.setTextSize(2);
   display.setCursor(67, 12);
   display.print((int)setpoint);
@@ -262,7 +253,7 @@ void updateDisplay() {
   display.setCursor(67, 36);
   display.print((char)247); display.print("C");
 
-  // ─ Bottom: WiFi info
+  // ─ Bottom: WiFi
   display.setTextSize(1);
   display.setCursor(0, 54);
   if (apMode) {
@@ -271,36 +262,31 @@ void updateDisplay() {
     display.print(WiFi.localIP());
   }
 
-  // ─ Output ON indicator: inverted 3px border
+  // ─ Output ON: thick inverted border
   if (outputOn) {
-    // draw 3 concentric rectangles to make a thick border, inverted
-    for (int t = 0; t < 3; t++) {
-      display.drawRect(t, t, OLED_W - 2*t, OLED_H - 2*t, SSD1306_INVERSE);
+    for (int i = 0; i < 3; i++) {
+      display.drawRect(i, i, OLED_W - 2*i, OLED_H - 2*i, SSD1306_INVERSE);
     }
   }
 
   display.display();
 }
 
-// ─── Button handling (accelerating ramp) ─────────────────────────────────────────
+// ─── Button handling ──────────────────────────────────────────────────────────────
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
-    bool raw = !digitalRead(btns[i].pin);  // active low
+    bool raw = !digitalRead(btns[i].pin);
     if (raw && !btns[i].lastRaw) {
-      // Fresh press: fire immediately, reset ramp
       btns[i].held            = true;
       btns[i].downAt          = now;
       btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
       btns[i].currentStep     = SP_STEP_INITIAL;
-      btns[i].nextFire        = now + RAMP_DELAY_MS;  // first repeat after delay
-      // Immediate first tick for UP/DOWN
+      btns[i].nextFire        = now + RAMP_DELAY_MS;
       if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
       if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
     }
-    if (!raw) {
-      btns[i].held = false;
-    }
+    if (!raw) btns[i].held = false;
     btns[i].lastRaw = raw;
   }
 }
@@ -344,13 +330,15 @@ void onWifiConnect() {
   apMode = false;
   DBG("\nIP: "); DBGLN(WiFi.localIP());
   MDNS.end();
-  if (MDNS.begin(HOSTNAME)) DBGLN("mDNS: " HOSTNAME ".local");
+  if (MDNS.begin(HOSTNAME)) {
+    DBGLN(String("mDNS: ") + HOSTNAME + ".local");  // runtime concat, not literal
+  }
 }
 
 // ─── OTA ──────────────────────────────────────────────────────────────────────
 void setupOTA() {
   ArduinoOTA.setHostname(HOSTNAME);
-  ArduinoOTA.onStart([]()  { DBGLN("OTA"); });
+  ArduinoOTA.onStart([]()  { DBGLN("OTA start"); });
   ArduinoOTA.onError([](ota_error_t e) { DBG("OTA err "); DBGLN(e); });
   ArduinoOTA.begin();
 }
