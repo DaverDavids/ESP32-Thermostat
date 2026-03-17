@@ -29,6 +29,10 @@ const uint8_t PIN_BTN_UP  =  4;
 const uint8_t PIN_BTN_DN  =  6;
 const uint8_t PIN_BTN_CTR =  5;
 
+// outputOn=true  -> PIN_MOSFET LOW  (active-low load)
+// outputOn=false -> PIN_MOSFET HIGH
+#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? LOW : HIGH)
+
 // ─── OLED ─────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
 const uint8_t  OLED_H    =  32;
@@ -43,7 +47,7 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
 const uint32_t SAMPLE_MS  = 1000;
-const uint32_t DISPLAY_MS =  10;
+const uint32_t DISPLAY_MS =   10;
 
 // ─── Button debounce ──────────────────────────────────────────────────────────
 const uint32_t DEBOUNCE_MS = 30;
@@ -113,7 +117,7 @@ void setup() {
   delay(200);
 
   pinMode(PIN_MOSFET, OUTPUT);
-  digitalWrite(PIN_MOSFET, LOW);  // relay off regardless of boot state
+  MOSFET_WRITE(false);  // active-low: HIGH = off at boot
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
@@ -233,19 +237,6 @@ void loop() {
 }
 
 // ─── Display ──────────────────────────────────────────────────────────────────
-//
-// setTextSize(2): each char 12px wide x 16px tall, y=8 centers in 32px screen
-//
-// Layout (columns fixed; numbers never shift):
-//   Temp     right-aligned, right edge at x=42
-//   Label    left edge      at x=46   ("ON"=24px, "OFF"=36px)
-//   Setpoint left edge      at x=86
-//
-// Center label:
-//   "ON"  = manual override, relay ON
-//   "OFF" = manual override, relay OFF  (boot default)
-//   blank = automatic mode
-//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -275,15 +266,6 @@ void updateDisplay() {
 }
 
 // ─── Button handling ──────────────────────────────────────────────────────────
-//
-// Center button cycles:
-//   manual OFF -> manual ON  ("ON"  shown)   [boot starts here]
-//   manual ON  -> manual OFF ("OFF" shown)
-//   manual OFF -> auto       (blank)          [only after first manual ON]
-//
-// Simplified: since boot starts in manual OFF, first press = ON,
-// second = OFF, third = auto. Same state machine as before.
-//
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
@@ -314,11 +296,11 @@ void updateButtons() {
             if (!manualOverride) {
               manualOverride = true;
               outputOn       = true;
-              digitalWrite(PIN_MOSFET, HIGH);
+              MOSFET_WRITE(true);
               DBGLN("Manual ON");
             } else if (outputOn) {
               outputOn = false;
-              digitalWrite(PIN_MOSFET, LOW);
+              MOSFET_WRITE(false);
               DBGLN("Manual OFF");
             } else {
               manualOverride = false;
@@ -353,7 +335,7 @@ float readTempC() {
 void controlLoop() {
   if      (currentTemp < setpoint - hysteresis) outputOn = true;
   else if (currentTemp > setpoint + hysteresis) outputOn = false;
-  digitalWrite(PIN_MOSFET, outputOn ? HIGH : LOW);
+  MOSFET_WRITE(outputOn);
 }
 
 // ─── WiFi helpers ─────────────────────────────────────────────────────────────
