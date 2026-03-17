@@ -51,7 +51,7 @@ const uint32_t DEBOUNCE_MS = 30;
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  200;
 const uint32_t RAMP_RATE_INITIAL_MS =  100;
-const uint32_t RAMP_RATE_MIN_MS     =   1;
+const uint32_t RAMP_RATE_MIN_MS     =    1;
 const float    RAMP_ACCEL           = 0.85f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
@@ -66,9 +66,9 @@ Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
-bool     outputOn    = false;
-bool     apMode      = false;
-bool     manualOverride = false;
+bool     outputOn       = false;  // relay off at boot
+bool     apMode         = false;
+bool     manualOverride = true;   // boot into manual OFF; auto never runs until user enables it
 
 float    probeOffset =  0.0f;
 float    hysteresis  =  5.0f;
@@ -113,7 +113,7 @@ void setup() {
   delay(200);
 
   pinMode(PIN_MOSFET, OUTPUT);
-  digitalWrite(PIN_MOSFET, LOW);
+  digitalWrite(PIN_MOSFET, LOW);  // relay off regardless of boot state
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
@@ -236,43 +236,38 @@ void loop() {
 //
 // setTextSize(2): each char 12px wide x 16px tall, y=8 centers in 32px screen
 //
-// Layout (all columns fixed so numbers never shift):
-//   Temp     right-aligned, right edge at x=42   (3 digits = 36px, starts x=6)
-//   Label    left edge      at x=46              ("ON"=24px, "OFF"=36px)
-//   Setpoint left edge      at x=86              (3 digits = 36px, ends x=122)
+// Layout (columns fixed; numbers never shift):
+//   Temp     right-aligned, right edge at x=42
+//   Label    left edge      at x=46   ("ON"=24px, "OFF"=36px)
+//   Setpoint left edge      at x=86
 //
-// Total worst case: 42 + 4 + 36 + 4 + 36 = 122px < 128 ✓
-//
-// Center label meanings:
-//   "ON"  = manual override, output ON
-//   "OFF" = manual override, output OFF
-//   blank = automatic mode (no label shown)
+// Center label:
+//   "ON"  = manual override, relay ON
+//   "OFF" = manual override, relay OFF  (boot default)
+//   blank = automatic mode
 //
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(2);
 
-  const int Y      =  8;   // centers 16px text in 32px screen
-  const int CW     = 12;   // size-2 char width
-  const int T_REDGE = 42;  // right edge of temp field
-  const int LBL_X  = 46;  // left edge of center label
-  const int SP_X   = 86;  // left edge of setpoint field
+  const int Y       =  8;
+  const int CW      = 12;
+  const int T_REDGE = 42;
+  const int LBL_X   = 46;
+  const int SP_X    = 86;
 
-  // ─ Temp: right-aligned
   String tempStr = String((int)round(currentTemp));
   int tempX = T_REDGE - (int)(tempStr.length()) * CW;
   if (tempX < 0) tempX = 0;
   display.setCursor(tempX, Y);
   display.print(tempStr);
 
-  // ─ Center label: only shown in manual override
   if (manualOverride) {
     display.setCursor(LBL_X, Y);
     display.print(outputOn ? "ON" : "OFF");
   }
 
-  // ─ Setpoint: left-aligned
   display.setCursor(SP_X, Y);
   display.print((int)round(setpoint));
 
@@ -282,9 +277,12 @@ void updateDisplay() {
 // ─── Button handling ──────────────────────────────────────────────────────────
 //
 // Center button cycles:
-//   auto          -> manual ON  ("ON"  shown)
-//   manual ON     -> manual OFF ("OFF" shown)
-//   manual OFF    -> auto       (blank)
+//   manual OFF -> manual ON  ("ON"  shown)   [boot starts here]
+//   manual ON  -> manual OFF ("OFF" shown)
+//   manual OFF -> auto       (blank)          [only after first manual ON]
+//
+// Simplified: since boot starts in manual OFF, first press = ON,
+// second = OFF, third = auto. Same state machine as before.
 //
 void updateButtons() {
   unsigned long now = millis();
