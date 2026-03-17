@@ -33,7 +33,7 @@ const uint8_t PIN_BTN_CTR =  5;
 const uint8_t  OLED_W    = 128;
 const uint8_t  OLED_H    =  32;
 const uint8_t  OLED_ADDR = 0x3C;
-const uint32_t IP_SPLASH_MS = 4000;
+const uint32_t IP_SPLASH_MS = 2000;
 
 // ─── WiFi ─────────────────────────────────────────────────────────────────────
 const char*    HOSTNAME        = "thermostat";
@@ -43,7 +43,7 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
 const uint32_t SAMPLE_MS  = 1000;
-const uint32_t DISPLAY_MS =  200;
+const uint32_t DISPLAY_MS =  10;
 
 // ─── Button debounce ──────────────────────────────────────────────────────────
 const uint32_t DEBOUNCE_MS = 30;
