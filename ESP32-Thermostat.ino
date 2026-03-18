@@ -365,9 +365,19 @@ void updateButtons() {
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float readTempC() {
   const int N = 16;
+  float buf[N];
+  for (int i = 0; i < N; i++) buf[i] = ina219.getShuntVoltage_mV();
+  // insertion sort
+  for (int i = 1; i < N; i++) {
+    float key = buf[i]; int j = i - 1;
+    while (j >= 0 && buf[j] > key) { buf[j+1] = buf[j]; j--; }
+    buf[j+1] = key;
+  }
+  // average middle 8 (discard top 4 and bottom 4)
   float shuntmV = 0;
-  for (int i = 0; i < N; i++) shuntmV += ina219.getShuntVoltage_mV();
-  shuntmV /= N;
+  for (int i = 4; i < 12; i++) shuntmV += buf[i];
+  shuntmV /= 8.0f;
+  
   lastShuntMV = shuntmV; // store averaged shunt voltage for use by UI and status
   float cjc_C    = temperatureRead();
   float uv_per_c = (customUvPerC > 0.0f)
