@@ -94,6 +94,13 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
+// NEW: log buffer for samples
+struct SampleLog { float tC; float shuntmV; };
+#define LOG_SIZE 256
+SampleLog sampleLog[LOG_SIZE];
+uint16_t logHead  = 0;
+uint16_t logCount = 0;
+
 unsigned long lastSample        = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
@@ -368,7 +375,14 @@ float readTempC() {
                   : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
   float total_mV = lastShuntMV + cjc_mV;
-  return (total_mV * 1000.0f / uv_per_c) + probeOffset;
+  // Compute calibrated temperature
+  float tC = (total_mV * 1000.0f / uv_per_c) + probeOffset;
+  // Push log entry
+  sampleLog[logHead] = { tC, lastShuntMV };
+  logHead  = (logHead + 1) % LOG_SIZE;
+  if (logCount < LOG_SIZE) logCount++;
+
+  return tC;
 }
 
 // ─── Bang-bang control ────────────────────────────────────────────────────────
@@ -528,6 +542,18 @@ void setupRoutes() {
     }
     j += "]";
     server.send(200, "application/json", j);
+  });
+
+  // New: CSV log endpoint
+  server.on("/log", HTTP_GET, []() {
+    uint16_t count = (logCount < LOG_SIZE) ? logCount : LOG_SIZE;
+    uint16_t start = (logCount < LOG_SIZE) ? 0 : logHead;
+    String csv = "idx,tempC,shuntmV\n";
+    for (uint16_t i = 0; i < count; i++) {
+      SampleLog s = sampleLog[(start + i) % LOG_SIZE];
+      csv += String(i) + "," + String(s.tC, 4) + "," + String(s.shuntmV, 4) + "\n";
+    }
+    server.send(200, "text/csv", csv);
   });
 
   server.on("/config", HTTP_POST, []() {
