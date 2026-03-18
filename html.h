@@ -162,7 +162,7 @@ document.getElementById('calForm').addEventListener('submit', async e => {
     const r = await fetch('/calibrate', {method:'POST', body:params});
     if (!r.ok) throw new Error(await r.text());
     const data = await r.json();
-    document.getElementById('calResult').textContent = 'Calibrated uV/°C = ' + data.uvPerC.toFixed(4);
+    document.getElementById('calResult').textContent = 'Calibrated uV/°C = ' + data.uvPerC.toFixed(4) + ', Offset = ' + data.offset.toFixed(4);
     poll();
   } catch (err) {
     document.getElementById('calResult').textContent = 'Calibration failed: ' + err;
