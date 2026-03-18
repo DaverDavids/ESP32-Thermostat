@@ -75,11 +75,12 @@ bool     outputOn       = false;  // relay off at boot
 bool     apMode         = false;
 bool     manualOverride = true;   // boot into manual OFF
 
-float    probeOffset =  0.0f;
-float    hysteresis  =  5.0f;
-int      probeType   =  0;
-String   savedSSID   = MYSSID;
-String   savedPSK    = MYPSK;
+float    probeOffset     =  0.0f;
+float    hysteresis      =  5.0f;
+int      probeType       =  0;
+float    customUvPerC    =  0.0f; // overrides probe type calibration when >0
+String   savedSSID       = MYSSID;
+String   savedPSK        = MYPSK;
 
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
 
@@ -353,7 +354,9 @@ void updateButtons() {
 float readTempC() {
   float shuntmV  = ina219.getShuntVoltage_mV();
   float cjc_C    = temperatureRead();
-  float uv_per_c = PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+  float uv_per_c = (customUvPerC > 0.0f)
+                  ? customUvPerC
+                  : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
   float total_mV = shuntmV + cjc_mV;
   return (total_mV * 1000.0f / uv_per_c) + probeOffset;
@@ -404,12 +407,13 @@ void setupOTA() {
 // ─── Prefs ────────────────────────────────────────────────────────────────────
 void loadPrefs() {
   prefs.begin("therm", true);
-  setpoint    = prefs.getFloat ("sp",    500.0);
-  hysteresis  = prefs.getFloat ("hyst",    5.0);
-  probeOffset = prefs.getFloat ("off",     0.0);
-  probeType   = prefs.getInt   ("ptype",     0);
-  savedSSID   = prefs.getString("ssid", MYSSID);
-  savedPSK    = prefs.getString("psk",   MYPSK);
+  setpoint      = prefs.getFloat ("sp",    500.0);
+  hysteresis    = prefs.getFloat ("hyst",    5.0);
+  probeOffset   = prefs.getFloat ("off",     0.0);
+  probeType     = prefs.getInt   ("ptype",     0);
+  customUvPerC  = prefs.getFloat ("uvpc",    0.0);
+  savedSSID     = prefs.getString("ssid", MYSSID);
+  savedPSK      = prefs.getString("psk",   MYPSK);
   prefs.end();
 }
 
@@ -419,6 +423,7 @@ void savePrefs() {
   prefs.putFloat ("hyst",  hysteresis);
   prefs.putFloat ("off",   probeOffset);
   prefs.putInt   ("ptype", probeType);
+  prefs.putFloat ("uvpc",  customUvPerC);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
   prefs.end();
@@ -436,6 +441,11 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
+    float shuntMV    = ina219.getShuntVoltage_mV();
+    float uvPerC     = (customUvPerC > 0.0f)
+                    ? customUvPerC
+                    : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+
     String j = "{\"temp\":"        + String(currentTemp,    1)
              + ",\"setpoint\":"   + String(setpoint,        1)
              + ",\"output\":"     + String(outputOn ? 1 : 0)
@@ -443,8 +453,26 @@ void setupRoutes() {
              + ",\"hysteresis\":" + String(hysteresis,      1)
              + ",\"offset\":"     + String(probeOffset,     1)
              + ",\"probeType\":"  + String(probeType)
+             + ",\"shuntMV\":"    + String(shuntMV,       4)
+             + ",\"uvPerC\":"     + String(uvPerC,        4)
              + "}";
     server.send(200, "application/json", j);
+  });
+
+  server.on("/calibrate", HTTP_POST, []() {
+    if (!server.hasArg("mv") || !server.hasArg("temp")) {
+      server.send(400, "text/plain", "Missing mv or temp");
+      return;
+    }
+    float mv   = server.arg("mv").toFloat();
+    float temp = server.arg("temp").toFloat();
+    if (temp <= 0.0f) {
+      server.send(400, "text/plain", "Temp must be >0");
+      return;
+    }
+    customUvPerC = (mv * 1000.0f) / temp;
+    savePrefs();
+    server.send(200, "application/json", String("{\"uvPerC\":") + String(customUvPerC, 4) + "}");
   });
 
   server.on("/history", HTTP_GET, []() {

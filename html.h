@@ -30,6 +30,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp;
     Output: <span id="out" class="badge">--</span>
   </div>
+  <div>Raw voltage: <span id="rawMv">--</span> mV</div>
 </div>
 
 <div class="card">
@@ -49,8 +50,19 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
         <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
       </select>
     </label>
+    <div>Current uV/&deg;C: <span id="uvpc">--</span></div>
     <button type="submit">Save Config</button>
   </form>
+</div>
+
+<div class="card">
+  <h2>&#x1F527; Calibration</h2>
+  <form id="calForm">
+    <label>Voltage reading (mV)<input type="number" step="0.0001" name="mv" id="calMv"></label>
+    <label>True temperature (&deg;C)<input type="number" step="0.1" name="temp" id="calTemp"></label>
+    <button type="submit">Calibrate</button>
+  </form>
+  <div id="calResult" style="margin-top:.5rem;color:#0f9">--</div>
 </div>
 
 <div class="card">
@@ -100,6 +112,8 @@ async function poll() {
     ]);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
+    document.getElementById('rawMv').textContent = st.shuntMV.toFixed(4);
+    document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
     const outEl = document.getElementById('out');
     outEl.textContent = st.output ? 'ON' : 'OFF';
     outEl.className = 'badge ' + (st.output ? 'on' : 'off');
@@ -126,6 +140,22 @@ document.getElementById('cfgForm').addEventListener('submit', async e => {
   await fetch('/config', {method:'POST', body:params});
   alert('Saved!');
   poll();
+});
+
+// ── Calibration form ──────────────────────────────────────────────────────────
+document.getElementById('calForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const params = new URLSearchParams(fd);
+  try {
+    const r = await fetch('/calibrate', {method:'POST', body:params});
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    document.getElementById('calResult').textContent = 'Calibrated uV/°C = ' + data.uvPerC.toFixed(4);
+    poll();
+  } catch (err) {
+    document.getElementById('calResult').textContent = 'Calibration failed: ' + err;
+  }
 });
 
 // ── WiFi form ─────────────────────────────────────────────────────────────────
