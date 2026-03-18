@@ -58,9 +58,20 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 <div class="card">
   <h2>&#x1F527; Calibration</h2>
   <form id="calForm">
-    <label>Voltage reading (mV)<input type="number" step="0.0001" name="mv" id="calMv"></label>
-    <label>True temperature (&deg;C)<input type="number" step="0.1" name="temp" id="calTemp"></label>
-    <button type="submit">Calibrate</button>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+      <div>
+        <label>Point 1 - Voltage (mV)<input type="number" step="0.0001" name="mv1" id="calMv1"></label>
+        <label>Point 1 - Temperature (&deg;C)<input type="number" step="0.1" name="temp1" id="calTemp1"></label>
+      </div>
+      <div>
+        <label>Point 2 - Voltage (mV)<input type="number" step="0.0001" name="mv2" id="calMv2"></label>
+        <label>Point 2 - Temperature (&deg;C)<input type="number" step="0.1" name="temp2" id="calTemp2"></label>
+      </div>
+    </div>
+    <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+      <button type="submit">Calibrate</button>
+      <button type="button" onclick="clearCalibration()" style="background:#777;">Clear Calibration</button>
+    </div>
   </form>
   <div id="calResult" style="margin-top:.5rem;color:#0f9">--</div>
 </div>
@@ -166,6 +177,19 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
   await fetch('/wifi', {method:'POST', body:params});
   alert('WiFi saved. Device will reboot.');
 });
+
+// ── Clear calibration ─────────────────────────────────────────────────────────
+async function clearCalibration() {
+  try {
+    const r = await fetch('/calibrate/clear', {method:'POST'});
+    if (!r.ok) throw new Error(await r.text());
+    document.getElementById('calResult').textContent = 'Calibration cleared';
+    document.getElementById('calForm').reset();
+    poll();
+  } catch (err) {
+    document.getElementById('calResult').textContent = 'Clear failed: ' + err;
+  }
+}
 </script>
 </body>
 </html>

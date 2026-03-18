@@ -463,19 +463,36 @@ void setupRoutes() {
   });
 
   server.on("/calibrate", HTTP_POST, []() {
-    if (!server.hasArg("mv") || !server.hasArg("temp")) {
-      server.send(400, "text/plain", "Missing mv or temp");
+    if (!server.hasArg("mv1") || !server.hasArg("temp1") || 
+        !server.hasArg("mv2") || !server.hasArg("temp2")) {
+      server.send(400, "text/plain", "Missing mv1, temp1, mv2, or temp2");
       return;
     }
-    float mv   = server.arg("mv").toFloat();
-    float temp = server.arg("temp").toFloat();
-    if (temp <= 0.0f) {
-      server.send(400, "text/plain", "Temp must be >0");
+    float mv1   = server.arg("mv1").toFloat();
+    float temp1 = server.arg("temp1").toFloat();
+    float mv2   = server.arg("mv2").toFloat();
+    float temp2 = server.arg("temp2").toFloat();
+    
+    if (temp2 <= temp1) {
+      server.send(400, "text/plain", "temp2 must be greater than temp1");
       return;
     }
-    customUvPerC = (mv * 1000.0f) / temp;
+    
+    // Two-point calibration
+    customUvPerC = (mv2 - mv1) * 1000.0f / (temp2 - temp1);
+    probeOffset = temp1 - (mv1 * 1000.0f / customUvPerC);
     savePrefs();
-    server.send(200, "application/json", String("{\"uvPerC\":") + String(customUvPerC, 4) + "}");
+    
+    String response = String("{\"uvPerC\":") + String(customUvPerC, 4) + 
+                     ",\"offset\":" + String(probeOffset, 4) + "}";
+    server.send(200, "application/json", response);
+  });
+
+  server.on("/calibrate/clear", HTTP_POST, []() {
+    customUvPerC = 0.0f;
+    probeOffset = 0.0f;
+    savePrefs();
+    server.send(200, "application/json", "{\"status\":\"cleared\"}");
   });
 
   server.on("/history", HTTP_GET, []() {
