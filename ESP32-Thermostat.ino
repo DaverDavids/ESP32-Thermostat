@@ -71,6 +71,7 @@ Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
+float    lastShuntMV =   0.0f;
 bool     outputOn       = false;  // relay off at boot
 bool     apMode         = false;
 bool     manualOverride = true;   // boot into manual OFF
@@ -360,12 +361,13 @@ float readTempC() {
   float shuntmV = 0;
   for (int i = 0; i < N; i++) shuntmV += ina219.getShuntVoltage_mV();
   shuntmV /= N;
+  lastShuntMV = shuntmV; // store averaged shunt voltage for use by UI and status
   float cjc_C    = temperatureRead();
   float uv_per_c = (customUvPerC > 0.0f)
-                 ? customUvPerC
-                 : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+                  ? customUvPerC
+                  : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
-  float total_mV = shuntmV + cjc_mV;
+  float total_mV = lastShuntMV + cjc_mV;
   return (total_mV * 1000.0f / uv_per_c) + probeOffset;
 }
 
@@ -456,7 +458,7 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    float shuntMV    = ina219.getShuntVoltage_mV();
+  float shuntMV    = lastShuntMV;
     float uvPerC     = (customUvPerC > 0.0f)
                      ? customUvPerC
                      : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
