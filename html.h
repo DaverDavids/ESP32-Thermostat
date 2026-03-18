@@ -129,13 +129,20 @@ async function poll() {
     outEl.textContent = st.output ? 'ON' : 'OFF';
     outEl.className = 'badge ' + (st.output ? 'on' : 'off');
     currentSetpoint = st.setpoint;
-    // Pre-fill config form if empty
-    if (!document.getElementById('cfgSp').value) {
-      document.getElementById('cfgSp').value    = st.setpoint;
-      document.getElementById('cfgHyst').value  = st.hysteresis;
-      document.getElementById('cfgOff').value   = st.offset;
-      document.getElementById('cfgPtype').value = st.probeType;
-    }
+     // Pre-fill config form if empty
+     if (!document.getElementById('cfgSp').value) {
+       document.getElementById('cfgSp').value    = st.setpoint;
+       document.getElementById('cfgHyst').value  = st.hysteresis;
+       document.getElementById('cfgOff').value   = st.offset;
+       document.getElementById('cfgPtype').value = st.probeType;
+     }
+     // Pre-fill calibration form if empty
+     if (!document.getElementById('calMv1').value) {
+       document.getElementById('calMv1').value   = st.calMv1;
+       document.getElementById('calTemp1').value = st.calTemp1;
+       document.getElementById('calMv2').value   = st.calMv2;
+       document.getElementById('calTemp2').value = st.calTemp2;
+     }
     drawChart(hist, currentSetpoint);
   } catch(e) { console.warn('poll error', e); }
 }

@@ -79,6 +79,10 @@ float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
 int      probeType       =  0;
 float    customUvPerC    =  0.0f; // overrides probe type calibration when >0
+float    calMv1          =  0.0f;   // raw mV point 1 for calibration
+float    calTemp1        =  0.0f;   // raw temp point 1 for calibration
+float    calMv2          =  0.0f;   // raw mV point 2 for calibration
+float    calTemp2        =  0.0f;   // raw temp point 2 for calibration
 String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
@@ -415,6 +419,10 @@ void loadPrefs() {
   probeOffset   = prefs.getFloat ("off",     0.0);
   probeType     = prefs.getInt   ("ptype",     0);
   customUvPerC  = prefs.getFloat ("uvpc",    0.0);
+  calMv1        = prefs.getFloat ("mv1",     0.0);
+  calTemp1      = prefs.getFloat ("t1",      0.0);
+  calMv2        = prefs.getFloat ("mv2",     0.0);
+  calTemp2      = prefs.getFloat ("t2",      0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",   MYPSK);
   prefs.end();
@@ -427,6 +435,10 @@ void savePrefs() {
   prefs.putFloat ("off",   probeOffset);
   prefs.putInt   ("ptype", probeType);
   prefs.putFloat ("uvpc",  customUvPerC);
+  prefs.putFloat ("mv1",   calMv1);
+  prefs.putFloat ("t1",    calTemp1);
+  prefs.putFloat ("mv2",   calMv2);
+  prefs.putFloat ("t2",    calTemp2);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
   prefs.end();
@@ -446,8 +458,8 @@ void setupRoutes() {
   server.on("/status", HTTP_GET, []() {
     float shuntMV    = ina219.getShuntVoltage_mV();
     float uvPerC     = (customUvPerC > 0.0f)
-                    ? customUvPerC
-                    : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+                     ? customUvPerC
+                     : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
 
     String j = "{\"temp\":"        + String(currentTemp,    1)
              + ",\"setpoint\":"   + String(setpoint,        1)
@@ -458,6 +470,10 @@ void setupRoutes() {
              + ",\"probeType\":"  + String(probeType)
              + ",\"shuntMV\":"    + String(shuntMV,       4)
              + ",\"uvPerC\":"     + String(uvPerC,        4)
+             + ",\"calMv1\":"     + String(calMv1,        4)
+             + ",\"calTemp1\":"   + String(calTemp1,      1)
+             + ",\"calMv2\":"     + String(calMv2,        4)
+             + ",\"calTemp2\":"   + String(calTemp2,      1)
              + "}";
     server.send(200, "application/json", j);
   });
@@ -477,6 +493,12 @@ void setupRoutes() {
       server.send(400, "text/plain", "temp2 must be greater than temp1");
       return;
     }
+    
+    // Store raw calibration points
+    calMv1 = mv1;
+    calTemp1 = temp1;
+    calMv2 = mv2;
+    calTemp2 = temp2;
     
     // Two-point calibration
     customUvPerC = (mv2 - mv1) * 1000.0f / (temp2 - temp1);
