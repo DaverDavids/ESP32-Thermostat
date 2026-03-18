@@ -553,7 +553,7 @@ void setupRoutes() {
       SampleLog s = sampleLog[(start + i) % LOG_SIZE];
       csv += String(i) + "," + String(s.tC, 4) + "," + String(s.shuntmV, 4) + "\n";
     }
-    server.send(200, "text/csv", csv);
+    server.send(200, "text/plain", csv);
   });
 
   server.on("/config", HTTP_POST, []() {
