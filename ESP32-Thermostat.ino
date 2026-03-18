@@ -130,7 +130,7 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
 
   if (!ina219.begin()) { DBGLN("INA219 not found"); }
-  else { ina219.setCalibration_32V_2A(); DBGLN("INA219 ready"); }
+  else { ina219.setCalibration_16V_400mA(); DBGLN("INA219 ready"); }
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     DBGLN("SSD1306 not found");
@@ -352,11 +352,14 @@ void updateButtons() {
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float readTempC() {
-  float shuntmV  = ina219.getShuntVoltage_mV();
+  const int N = 16;
+  float shuntmV = 0;
+  for (int i = 0; i < N; i++) shuntmV += ina219.getShuntVoltage_mV();
+  shuntmV /= N;
   float cjc_C    = temperatureRead();
   float uv_per_c = (customUvPerC > 0.0f)
-                  ? customUvPerC
-                  : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+                 ? customUvPerC
+                 : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
   float total_mV = shuntmV + cjc_mV;
   return (total_mV * 1000.0f / uv_per_c) + probeOffset;
