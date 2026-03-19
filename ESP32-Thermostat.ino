@@ -512,40 +512,45 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-      float shuntMV    = lastShuntMV;
-      float uvPerC     = (customUvPerC > 0.0f)
-                      ? customUvPerC
-                      : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
-      float cjc_C      = temperatureRead();
-      float cjc_mV     = (cjc_C * uvPerC) / 1000.0f;
-      float totalMV    = shuntMV + cjc_mV;
+    float uvPerC = (customUvPerC > 0.0f)
+                 ? customUvPerC
+                 : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+    float cjc_C   = temperatureRead();
+    float cjc_mV  = (cjc_C * uvPerC) / 1000.0f;
+    float totalMV = lastShuntMV + cjc_mV;
 
-      String j = "{\"temp\":"        + String(currentTemp,    1)
-              + ",\"setpoint\":"   + String(setpoint,        1)
-              + ",\"output\":"     + String(outputOn ? 1 : 0)
-              + ",\"manual\":"     + String(manualOverride ? 1 : 0)
-              + ",\"hysteresis\":" + String(hysteresis,      1)
-              + ",\"offset\":"     + String(probeOffset,     1)
-              + ",\"probeType\":"  + String(probeType)
-              + ",\"shuntMV\":"    + String(totalMV,         4)
-              + ",\"uvPerC\":"     + String(uvPerC,          4)
-              + ",\"calMv1\":"     + String(calMv1,          4)
-              + ",\"calTemp1\":"   + String(calTemp1,        1)
-              + ",\"calMv2\":"     + String(calMv2,          4)
-              + ",\"calTemp2\":"   + String(calTemp2,        1)
-              + "}";
-      server.send(200, "application/json", j);
-    });
+    String j = "{\"temp\":"        + String(currentTemp,    1)
+            + ",\"setpoint\":"    + String(setpoint,        1)
+            + ",\"output\":"      + String(outputOn ? 1 : 0)
+            + ",\"manual\":"      + String(manualOverride ? 1 : 0)
+            + ",\"hysteresis\":"  + String(hysteresis,      1)
+            + ",\"offset\":"      + String(probeOffset,     1)
+            + ",\"probeType\":"   + String(probeType)
+            + ",\"shuntMV\":"     + String(lastShuntMV,     4)
+            + ",\"totalMV\":"     + String(totalMV,         4)
+            + ",\"cjcC\":"        + String(cjc_C,           2)
+            + ",\"uvPerC\":"      + String(uvPerC,          4)
+            + ",\"calMv1\":"      + String(calMv1,          4)
+            + ",\"calTemp1\":"    + String(calTemp1,        1)
+            + ",\"calCjc1\":"     + String(calCjc1,         2)
+            + ",\"calMv2\":"      + String(calMv2,          4)
+            + ",\"calTemp2\":"    + String(calTemp2,        1)
+            + ",\"calCjc2\":"     + String(calCjc2,         2)
+            + "}";
+    server.send(200, "application/json", j);
+  });
 
   server.on("/calibrate", HTTP_POST, []() {
-    if (!server.hasArg("mv1") || !server.hasArg("temp1") || 
-        !server.hasArg("mv2") || !server.hasArg("temp2")) {
-      server.send(400, "text/plain", "Missing mv1, temp1, mv2, or temp2");
+    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
+        !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
+      server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
       return;
     }
     float mv1   = server.arg("mv1").toFloat();
     float temp1 = server.arg("temp1").toFloat();
+    float cjc1  = server.arg("cjc1").toFloat();
     float mv2   = server.arg("mv2").toFloat();
+    float cjc2  = server.arg("cjc2").toFloat();
     float temp2 = server.arg("temp2").toFloat();
     
     if (temp2 <= temp1) {
@@ -554,18 +559,19 @@ void setupRoutes() {
     }
     
     // Store raw calibration points
-    calMv1 = mv1;
-    calTemp1 = temp1;
-    calMv2 = mv2;
-    calTemp2 = temp2;
+    calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
+    calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
     
-    // Two-point calibration
-    customUvPerC = (mv2 - mv1) * 1000.0f / (temp2 - temp1);
-    probeOffset = temp1 - (mv1 * 1000.0f / customUvPerC);
+    // Two-point calibration using the provided CJCs
+    float uvEst = PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+    float totalMv1 = mv1 + (cjc1 * uvEst / 1000.0f);
+    float totalMv2 = mv2 + (cjc2 * uvEst / 1000.0f);
+    customUvPerC = (totalMv2 - totalMv1) * 1000.0f / (temp2 - temp1);
+    probeOffset  = temp1 - (totalMv1 * 1000.0f / customUvPerC);
     savePrefs();
     
-    String response = String("{\"uvPerC\":") + String(customUvPerC, 4) + 
-                     ",\"offset\":" + String(probeOffset, 4) + "}";
+    String response = String("{\"uvPerC\":") + String(customUvPerC, 4)
+                    + ",\"offset\":" + String(probeOffset, 4) + "}";
     server.send(200, "application/json", response);
   });
 

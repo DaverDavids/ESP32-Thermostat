@@ -27,10 +27,12 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 <div class="card">
   <h2>&#x1F321; Live Temperature</h2>
   <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
-  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp;
-    Output: <span id="out" class="badge">--</span>
+  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
+  <div style="margin-top:.5rem;font-size:.9rem;color:#aaa;">
+    <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
+    <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
+    <div>Total voltage (with JC): <span id="totalMV">--</span> mV</div>
   </div>
-  <div>Total voltage (mV): <span id="rawMv">--</span> mV</div>
 </div>
 
 <div class="card">
@@ -60,17 +62,19 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <form id="calForm">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
       <div>
-        <label>Point 1 - Voltage (mV)<input type="number" step="0.0001" name="mv1" id="calMv1"></label>
-        <label>Point 1 - Temperature (&deg;C)<input type="number" step="0.1" name="temp1" id="calTemp1"></label>
+        <label>Point 1 - mV (mv1)<input type="number" step="0.0001" name="mv1" id="calMv1"></label>
+        <label>Point 1 - CJ C (&deg;C)<input type="number" step="0.1" name="cjc1" id="calCjc1"></label>
+        <label>Point 1 - True Temp (&deg;C)<input type="number" step="0.1" name="temp1" id="calTemp1"></label>
       </div>
       <div>
-        <label>Point 2 - Voltage (mV)<input type="number" step="0.0001" name="mv2" id="calMv2"></label>
-        <label>Point 2 - Temperature (&deg;C)<input type="number" step="0.1" name="temp2" id="calTemp2"></label>
+        <label>Point 2 - mV (mv2)<input type="number" step="0.0001" name="mv2" id="calMv2"></label>
+        <label>Point 2 - CJ C (&deg;C)<input type="number" step="0.1" name="cjc2" id="calCjc2"></label>
+        <label>Point 2 - True Temp (&deg;C)<input type="number" step="0.1" name="temp2" id="calTemp2"></label>
       </div>
     </div>
-    <div style="display:flex;gap:0.5rem;margin-top:0.5rem;">
+    <div style="display:flex;gap:0.5rem;margin-top:.5rem;">
       <button type="submit">Calibrate</button>
-      <button type="button" onclick="clearCalibration()" style="background:#777;">Clear Calibration</button>
+      <button type="button" onclick="clearCalibration()" style="background:#a33;">Clear Calibration</button>
     </div>
   </form>
   <div id="calResult" style="margin-top:.5rem;color:#0f9">--</div>
@@ -129,6 +133,16 @@ async function poll() {
     outEl.textContent = st.output ? 'ON' : 'OFF';
     outEl.className = 'badge ' + (st.output ? 'on' : 'off');
     currentSetpoint = st.setpoint;
+    // Live fields for CJC and total voltage
+    if (st.cjcC !== undefined) {
+      document.getElementById('cjcC').textContent = st.cjcC.toFixed(1);
+    }
+    if (st.shuntMV !== undefined) {
+      document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
+    }
+    if (st.totalMV !== undefined) {
+      document.getElementById('totalMV').textContent = st.totalMV.toFixed(4);
+    }
     // Pre-fill config form if empty
     if (!document.getElementById('cfgSp').value) {
       document.getElementById('cfgSp').value    = st.setpoint;
@@ -136,11 +150,13 @@ async function poll() {
       document.getElementById('cfgOff').value   = st.offset;
       document.getElementById('cfgPtype').value = st.probeType;
     }
-    // Pre-fill calibration form from status only if user hasn't started typing
+    // Pre-fill calibration form with saved points on first load; also include CJCs
     if (document.getElementById('calMv1').value === "") {
       document.getElementById('calMv1').value   = st.calMv1;
+      document.getElementById('calCjc1').value  = st.calCjc1;
       document.getElementById('calTemp1').value = st.calTemp1;
       document.getElementById('calMv2').value   = st.calMv2;
+      document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
     }
     drawChart(hist, currentSetpoint);
