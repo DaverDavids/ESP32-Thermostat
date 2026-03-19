@@ -29,6 +29,16 @@
 5. Iterate based on results
 6. For web interface changes, verify HTML in html.h renders correctly
 
+### Running a Single Test
+- If a unit test framework is present (common in PlatformIO/Arduino projects using Unity), run a single test with:
+  - `pio test -e <env> -k "<test_pattern>"`
+  - Example: `pio test -e dev -k "readTempC"`
+- If your tests live as distinct test files (e.g., tests/*.cpp) and you want to run a specific test file, you can filter by filename:
+  - `pio test -e <env> -f tests/test_read_temp.cpp`
+- If there is no formal test framework, use a focused manual test strategy:
+  - Create a small dedicated sketch or a subset inside ESP32-Thermostat.ino guarded by a DEBUG/Test flag and run a targeted assertion path.
+- For accelerator feedback on a single feature, run the app on hardware and validate via the web UI or serial output; capture the log snippet for review.
+
 ## Code Style Guidelines
 
 ### File Organization

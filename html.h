@@ -27,11 +27,16 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 <div class="card">
   <h2>&#x1F321; Live Temperature</h2>
   <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
-  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
+  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span> <span id="mode" class="badge">AUTO</span></div>
   <div style="margin-top:.5rem;font-size:.9rem;color:#aaa;">
     <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
     <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
 <div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
+  </div>
+  <div style="margin-top:.5rem;">
+    <button onclick="postOutput('on')">Output On</button>
+    <button onclick="postOutput('off')">Output Off</button>
+    <button onclick="postOutput('auto')">Output Auto</button>
   </div>
 </div>
 
@@ -46,12 +51,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <label>Setpoint (&deg;C)<input type="number" step="1" name="sp" id="cfgSp"></label>
     <label>Hysteresis (&deg;C)<input type="number" step="0.5" name="hyst" id="cfgHyst"></label>
     <label>Probe Offset (&deg;C)<input type="number" step="0.5" name="off" id="cfgOff"></label>
-    <label>Probe Type
-      <select name="ptype" id="cfgPtype">
-        <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
-        <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
-      </select>
-    </label>
+    <!-- Probe Type moved to Calibration card -->
     <div>Current uV/&deg;C: <span id="uvpc">--</span></div>
     <button type="submit">Save Config</button>
   </form>
@@ -59,6 +59,14 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 
 <div class="card">
   <h2>&#x1F527; Calibration</h2>
+  <div style="margin-bottom:.5rem;">
+    <label>Probe Type
+      <select id="calPtype" name="ptype">
+        <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
+        <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
+      </select>
+    </label>
+  </div>
   <form id="calForm">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
       <div>
@@ -131,6 +139,10 @@ async function poll() {
     const outEl = document.getElementById('out');
     outEl.textContent = st.output ? 'ON' : 'OFF';
     outEl.className = 'badge ' + (st.output ? 'on' : 'off');
+    // Reflect manual/auto mode next to output badge
+    if (document.getElementById('mode')) {
+      document.getElementById('mode').textContent = st.manual ? 'MANUAL' : 'AUTO';
+    }
     currentSetpoint = st.setpoint;
     // Live fields for CJC and total voltage
     if (st.cjcC !== undefined) {
@@ -157,6 +169,10 @@ async function poll() {
       document.getElementById('calMv2').value   = st.calMv2;
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
+      // Prefill calibration probe type if available
+      if (document.getElementById('calPtype') && document.getElementById('calPtype').value === "") {
+        document.getElementById('calPtype').value = st.probeType;
+      }
     }
     drawChart(hist, currentSetpoint);
   } catch(e) { console.warn('poll error', e); }
@@ -211,6 +227,21 @@ async function clearCalibration() {
   } catch (err) {
     document.getElementById('calResult').textContent = 'Clear failed: ' + err;
   }
+}
+// Output control helper: POST to /output and refresh state
+function postOutput(mode){
+  fetch('/output', {method:'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body:'mode=' + mode})
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+    .then(() => poll())
+    .catch(e => console.warn('output error', e));
+}
+// Propagate probe type changes from Calibration card to config
+if (document.getElementById('calPtype')) {
+  document.getElementById('calPtype').addEventListener('change', async e => {
+    const val = e.target.value;
+    await fetch('/config', {method:'POST', body:'ptype=' + val});
+    poll();
+  });
 }
 </script>
 </body>

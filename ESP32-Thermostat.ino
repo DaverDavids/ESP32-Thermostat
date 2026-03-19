@@ -49,6 +49,9 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 const uint32_t FAST_SAMPLE_MS = 20;   // INA219 poll rate (50Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
+// Outlier rejection and dropout thresholds
+const float OUTLIER_MAX_JUMP = 80.0f; // °C max change between samples
+const float SHUNT_MIN_MV      = 0.3f;  // below this = dropout
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
 #define MEDIAN_N 9          // must be odd; 9 × 20ms = 180ms window
@@ -79,6 +82,7 @@ Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
 float    lastShuntMV =   0.0f;
+float    lastGoodTemp   = NAN;   // for outlier rejection
 bool     outputOn       = false;  // relay off at boot
 bool     apMode         = false;
 bool     manualOverride = true;   // boot into manual OFF
@@ -400,8 +404,22 @@ float rawTempC() {
                   : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
   float total_mV = smV + cjc_mV;
-  lastShuntMV = smV;
-  return (total_mV * 1000.0f / uv_per_c) + probeOffset;
+  float candidate = (total_mV * 1000.0f / uv_per_c) + probeOffset;
+
+  // Reject if shunt is below noise floor (probe dropout)
+  if (smV < SHUNT_MIN_MV) {
+    DBG("Dropout smV="); DBGLN(smV);
+    return isnan(lastGoodTemp) ? cjc_C : lastGoodTemp;
+  }
+  // Reject if jump is implausibly large (but allow on first reading)
+  if (!isnan(lastGoodTemp) && fabsf(candidate - lastGoodTemp) > OUTLIER_MAX_JUMP) {
+    DBG("Jump reject: "); DBGLN(candidate);
+    return lastGoodTemp;
+  }
+
+  lastShuntMV  = smV;
+  lastGoodTemp = candidate;
+  return candidate;
 }
 
 float medianOf(float* arr, uint8_t n) {
@@ -625,5 +643,20 @@ void setupRoutes() {
     } else {
       server.send(400, "text/plain", "Missing ssid or psk");
     }
+  });
+
+  // Web UI: output control route
+  server.on("/output", HTTP_POST, []() {
+    String mode = server.arg("mode");
+    if (mode == "on") {
+      manualOverride = true; outputOn = true;  MOSFET_WRITE(true);
+    } else if (mode == "off") {
+      manualOverride = true; outputOn = false; MOSFET_WRITE(false);
+    } else if (mode == "auto") {
+      manualOverride = false;
+    } else {
+      server.send(400, "text/plain", "mode must be on, off, or auto"); return;
+    }
+    server.send(200, "text/plain", "OK");
   });
 }
