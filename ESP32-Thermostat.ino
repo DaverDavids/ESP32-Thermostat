@@ -44,18 +44,17 @@ const char*    HOSTNAME        = "thermostat";
 const uint32_t WIFI_TIMEOUT_MS =  20000;
 const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
-// WiFi boot delay (ms). Set to 0 to disable and keep default behavior.
-// Example: 20000 for 20 seconds after boot.
-#define WIFI_BOOT_DELAY_MS 20000
-// Non-blocking WiFi boot delay scheduling
-unsigned long wifiBootStartMs = 0;
-bool wifiBootDelayCompleted = true;
-unsigned long wifiConnectStartMs = 0;
-bool wifiConnecting = false;
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t SAMPLE_MS  = 1000;
-const uint32_t DISPLAY_MS =   10;
+const uint32_t FAST_SAMPLE_MS = 20;   // INA219 poll rate (50Hz)
+const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
+const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
+
+// ─── Fast sampling / median filter ───────────────────────────────────────────
+#define MEDIAN_N 9          // must be odd; 9 × 20ms = 180ms window
+float   medBuf[MEDIAN_N];
+uint8_t medCount = 0;
+unsigned long lastFastSample = 0;
 
 // ─── Button debounce / long-press ──────────────────────────────────────────────
 const uint32_t DEBOUNCE_MS      =   30;
@@ -96,7 +95,7 @@ String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
-const float EMA_ALPHA = 0.3f;
+const float EMA_ALPHA = 1.0f;
 
 #define HIST_SIZE 720
 float    tempHistory[HIST_SIZE];
