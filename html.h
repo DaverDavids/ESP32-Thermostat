@@ -184,9 +184,6 @@ async function poll() {
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
     // Prefill calibration probe type if available
-    if (document.getElementById('calPtype') && document.getElementById('calPtype').value === "") {
-      document.getElementById('calPtype').value = st.probeType;
-    }
     }
     drawChart(hist, currentSetpoint);
   } catch(e) { console.warn('poll error', e); }

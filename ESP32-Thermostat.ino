@@ -547,6 +547,7 @@ void setupRoutes() {
             + ",\"hysteresis\":"  + String(hysteresis,      1)
             + ",\"offset\":"      + String(probeOffset,     1)
             + ",\"probeType\":"   + String(probeType)
+            + ",\"customUvPerC\":" + String(customUvPerC, 4)
             + ",\"shuntMV\":"     + String(lastShuntMV,     4)
             + ",\"totalMV\":"     + String(totalMV,         4)
             + ",\"cjcC\":"        + String(cjc_C,           2)
