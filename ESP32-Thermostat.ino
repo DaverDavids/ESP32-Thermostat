@@ -295,10 +295,7 @@ void loop() {
 // At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
 // Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
 // Solve for uvPerC:
-float dMv   = mv2 - mv1;           // 3.885
-float dTemp = (temp2 - temp1) - (cjc2 - cjc1);  // (176-21.5) - (25-25) = 154.5
-customUvPerC = (dMv * 1000.0f) / dTemp;
-probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
+
 
 //   Temp  right-edge  x=54  (3 digits x 18 = 54px, starts x=0)
 //   Gap                     20px  (x=54..74)

@@ -189,7 +189,7 @@ async function poll() {
   } catch(e) { console.warn('poll error', e); }
 }
 
-setInterval(poll, 3000);
+setInterval(poll, 500);
 poll();
 
 // ── Config form ──────────────────────────────────────────────────────────────
