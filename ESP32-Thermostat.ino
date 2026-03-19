@@ -46,7 +46,7 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t FAST_SAMPLE_MS = 20;   // INA219 poll rate (50Hz)
+const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (50Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
 // Outlier rejection and dropout thresholds
