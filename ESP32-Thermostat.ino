@@ -606,6 +606,8 @@ void setupRoutes() {
     customUvPerC = (dMv * 1000.0f) / dTemp;
     probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
 
+    savePrefs();
+    
     String response = String("{\"uvPerC\":") + String(customUvPerC, 4)
                     + ",\"offset\":" + String(probeOffset, 4) + "}";
     server.send(200, "application/json", response);
