@@ -109,7 +109,7 @@ uint16_t logHead  = 0;
 uint16_t logCount = 0;
 
 unsigned long lastReport        = 0;
-unsigned long lastFastSample    = 0;
+// removed duplicate global lastFastSample; keep the one in the fast-sampling block
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
@@ -133,7 +133,7 @@ struct BtnState {
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
-float readTempC(); void controlLoop();
+float rawTempC(); float medianOf(float* arr, uint8_t n); void controlLoop();
 void updateButtons(); void updateDisplay();
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
@@ -203,6 +203,9 @@ void setup() {
 void loop() {
   if (apMode) dns.processNextRequest();
   updateButtons();
+  // OTA/Server loop handling (start-up guarded elsewhere)
+  if (otaStarted) ArduinoOTA.handle();
+  if (serverStarted) server.handleClient();
 
   unsigned long now = millis();
 
@@ -266,15 +269,7 @@ void loop() {
     }
   }
 
-  if (now - lastSample >= SAMPLE_MS) {
-    lastSample = now;
-    currentTemp = readTempC();
-    DBG("T: "); DBGLN(currentTemp);
-    tempHistory[histHead] = currentTemp;
-    histHead = (histHead + 1) % HIST_SIZE;
-    if (histCount < HIST_SIZE) histCount++;
-    if (!manualOverride) controlLoop();
-  }
+  // Stale: removed old single-sample path (readTempC) and related scheduling
 
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
