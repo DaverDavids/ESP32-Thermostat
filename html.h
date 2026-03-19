@@ -51,19 +51,20 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <label>Setpoint (&deg;C)<input type="number" step="1" name="sp" id="cfgSp"></label>
     <label>Hysteresis (&deg;C)<input type="number" step="0.5" name="hyst" id="cfgHyst"></label>
     <label>Probe Offset (&deg;C)<input type="number" step="0.5" name="off" id="cfgOff"></label>
-    <!-- Probe Type moved to Calibration card -->
+    <label>CJC Offset (&deg;C)<input type="number" step="0.5" name="cjco" id="cfgCjco"></label>
     <div>Current uV/&deg;C: <span id="uvpc">--</span></div>
     <button type="submit">Save Config</button>
   </form>
 </div>
 
-<div class="card">
+  <div class="card">
   <h2>&#x1F527; Calibration</h2>
   <div style="margin-bottom:.5rem;">
     <label>Probe Type
       <select id="calPtype" name="ptype">
         <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
         <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
+        <option value="2">Manual calibration</option>
       </select>
     </label>
   </div>
@@ -139,9 +140,10 @@ async function poll() {
     const outEl = document.getElementById('out');
     outEl.textContent = st.output ? 'ON' : 'OFF';
     outEl.className = 'badge ' + (st.output ? 'on' : 'off');
-    // Reflect manual/auto mode next to output badge
+    // Reflect manual/auto + output mode next to output badge
     if (document.getElementById('mode')) {
-      document.getElementById('mode').textContent = st.manual ? 'MANUAL' : 'AUTO';
+      const modeStr = (st.manual ? 'MANUAL' : 'AUTO') + ' ' + (st.output ? 'ON' : 'OFF');
+      document.getElementById('mode').textContent = modeStr;
     }
     currentSetpoint = st.setpoint;
     // Live fields for CJC and total voltage
@@ -159,7 +161,12 @@ async function poll() {
       document.getElementById('cfgSp').value    = st.setpoint;
       document.getElementById('cfgHyst').value  = st.hysteresis;
       document.getElementById('cfgOff').value   = st.offset;
-      document.getElementById('cfgPtype').value = st.probeType;
+      var pEl = document.getElementById('cfgPtype');
+      if (pEl) pEl.value = st.probeType;
+    }
+    // Prefill CJC offset if available
+    if (document.getElementById('cfgCjco')) {
+      document.getElementById('cfgCjco').value = st.cjcOffset;
     }
     // Pre-fill calibration form with saved points on first load; also include CJCs
     if (document.getElementById('calMv1').value === "") {
@@ -169,10 +176,10 @@ async function poll() {
       document.getElementById('calMv2').value   = st.calMv2;
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
-      // Prefill calibration probe type if available
-      if (document.getElementById('calPtype') && document.getElementById('calPtype').value === "") {
-        document.getElementById('calPtype').value = st.probeType;
-      }
+    // Prefill calibration probe type if available
+    if (document.getElementById('calPtype') && document.getElementById('calPtype').value === "") {
+      document.getElementById('calPtype').value = st.probeType;
+    }
     }
     drawChart(hist, currentSetpoint);
   } catch(e) { console.warn('poll error', e); }

@@ -91,6 +91,7 @@ float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
 int      probeType       =  0;
 float    customUvPerC    =  0.0f; // overrides probe type calibration when >0
+float    cjcOffset       = -12.0f; // die temp offset; default -12C
 float    calMv1          =  0.0f;   // raw mV point 1 for calibration
 float    calTemp1        =  0.0f;   // raw temp point 1 for calibration
 float    calMv2          =  0.0f;   // raw mV point 2 for calibration
@@ -398,7 +399,7 @@ void updateButtons() {
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float rawTempC() {
   float smV   = ina219.getShuntVoltage_mV();
-  float cjc_C = temperatureRead();
+  float cjc_C = temperatureRead() + cjcOffset;
   float uv_per_c = (customUvPerC > 0.0f)
                   ? customUvPerC
                   : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
@@ -497,6 +498,7 @@ void loadPrefs() {
   calCjc2       = prefs.getFloat ("cjc2",    0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",   MYPSK);
+  cjcOffset     = prefs.getFloat("cjco", -12.0);
   prefs.end();
 }
 
@@ -515,6 +517,7 @@ void savePrefs() {
   prefs.putFloat ("t2",    calTemp2);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
+  prefs.putFloat("cjco", cjcOffset);
   prefs.end();
 }
 
@@ -548,6 +551,7 @@ void setupRoutes() {
             + ",\"totalMV\":"     + String(totalMV,         4)
             + ",\"cjcC\":"        + String(cjc_C,           2)
             + ",\"uvPerC\":"      + String(uvPerC,          4)
+            + ",\"cjcOffset\":"    + String(cjcOffset,        1)
             + ",\"calMv1\":"      + String(calMv1,          4)
             + ",\"calTemp1\":"    + String(calTemp1,        1)
             + ",\"calCjc1\":"     + String(calCjc1,         2)
@@ -559,7 +563,7 @@ void setupRoutes() {
   });
 
   server.on("/calibrate", HTTP_POST, []() {
-    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
+  if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
         !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
       server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
       return;
@@ -581,7 +585,7 @@ void setupRoutes() {
     calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
     
     // Two-point calibration using the provided CJCs
-    float uvEst = PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+    float uvEst = (probeType >= 0 && probeType <= 1) ? PROBE_UV_PER_C[probeType] : PROBE_UV_PER_C[0];
     float totalMv1 = mv1 + (cjc1 * uvEst / 1000.0f);
     float totalMv2 = mv2 + (cjc2 * uvEst / 1000.0f);
     customUvPerC = (totalMv2 - totalMv1) * 1000.0f / (temp2 - temp1);
@@ -628,6 +632,8 @@ void setupRoutes() {
     if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
     if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
     if (server.hasArg("ptype")) probeType   = server.arg("ptype").toInt();
+    // Optional: CJC offset
+    if (server.hasArg("cjco")) cjcOffset = server.arg("cjco").toFloat();
     savePrefs();
     server.send(200, "text/plain", "OK");
   });
