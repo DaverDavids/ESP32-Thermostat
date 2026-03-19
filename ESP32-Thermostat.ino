@@ -88,6 +88,7 @@ String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
+const float EMA_ALPHA = 0.3f;
 
 #define HIST_SIZE 720
 float    tempHistory[HIST_SIZE];
@@ -364,17 +365,20 @@ void updateButtons() {
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float readTempC() {
-  const int N = 4;
-  float shuntmV = 0;
-  for (int i = 0; i < N; i++) shuntmV += ina219.getShuntVoltage_mV();
-  shuntmV /= N;
+  lastShuntMV = ina219.getShuntVoltage_mV();
 
-  lastShuntMV = shuntmV;
+  float cjc_C = temperatureRead();
+  
+/*/  const int N = 16;
+  for (int i = 0; i < N; i++) {
+    float raw = ina219.getShuntVoltage_mV();
+    lastShuntMV = (EMA_ALPHA * raw) + ((1.0f - EMA_ALPHA) * lastShuntMV);
+  }
 
   const int CJC_N = 16;
   float cjc_C = 0;
   for (int i = 0; i < CJC_N; i++) cjc_C += temperatureRead();
-  cjc_C /= CJC_N;
+  cjc_C /= CJC_N;*/
 
   float uv_per_c = (customUvPerC > 0.0f)
                   ? customUvPerC
