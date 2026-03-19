@@ -368,7 +368,7 @@ float readTempC() {
   lastShuntMV = ina219.getShuntVoltage_mV();
 
   float cjc_C = temperatureRead();
-  
+
 /*/  const int N = 16;
   for (int i = 0; i < N; i++) {
     float raw = ina219.getShuntVoltage_mV();
@@ -481,27 +481,30 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    float shuntMV = lastShuntMV;
-    float uvPerC     = (customUvPerC > 0.0f)
-                     ? customUvPerC
-                     : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+      float shuntMV    = lastShuntMV;
+      float uvPerC     = (customUvPerC > 0.0f)
+                      ? customUvPerC
+                      : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
+      float cjc_C      = temperatureRead();
+      float cjc_mV     = (cjc_C * uvPerC) / 1000.0f;
+      float totalMV    = shuntMV + cjc_mV;
 
-    String j = "{\"temp\":"        + String(currentTemp,    1)
-             + ",\"setpoint\":"   + String(setpoint,        1)
-             + ",\"output\":"     + String(outputOn ? 1 : 0)
-             + ",\"manual\":"     + String(manualOverride ? 1 : 0)
-             + ",\"hysteresis\":" + String(hysteresis,      1)
-             + ",\"offset\":"     + String(probeOffset,     1)
-             + ",\"probeType\":"  + String(probeType)
-             + ",\"shuntMV\":"    + String(shuntMV,       4)
-             + ",\"uvPerC\":"     + String(uvPerC,        4)
-             + ",\"calMv1\":"     + String(calMv1,        4)
-             + ",\"calTemp1\":"   + String(calTemp1,      1)
-             + ",\"calMv2\":"     + String(calMv2,        4)
-             + ",\"calTemp2\":"   + String(calTemp2,      1)
-             + "}";
-    server.send(200, "application/json", j);
-  });
+      String j = "{\"temp\":"        + String(currentTemp,    1)
+              + ",\"setpoint\":"   + String(setpoint,        1)
+              + ",\"output\":"     + String(outputOn ? 1 : 0)
+              + ",\"manual\":"     + String(manualOverride ? 1 : 0)
+              + ",\"hysteresis\":" + String(hysteresis,      1)
+              + ",\"offset\":"     + String(probeOffset,     1)
+              + ",\"probeType\":"  + String(probeType)
+              + ",\"shuntMV\":"    + String(totalMV,         4)
+              + ",\"uvPerC\":"     + String(uvPerC,          4)
+              + ",\"calMv1\":"     + String(calMv1,          4)
+              + ",\"calTemp1\":"   + String(calTemp1,        1)
+              + ",\"calMv2\":"     + String(calMv2,          4)
+              + ",\"calTemp2\":"   + String(calTemp2,        1)
+              + "}";
+      server.send(200, "application/json", j);
+    });
 
   server.on("/calibrate", HTTP_POST, []() {
     if (!server.hasArg("mv1") || !server.hasArg("temp1") || 

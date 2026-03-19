@@ -30,7 +30,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp;
     Output: <span id="out" class="badge">--</span>
   </div>
-  <div>Raw voltage: <span id="rawMv">--</span> mV</div>
+  <div>Total voltage (mV): <span id="rawMv">--</span> mV</div>
 </div>
 
 <div class="card">
