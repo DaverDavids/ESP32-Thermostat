@@ -289,7 +289,17 @@ void loop() {
 // Numbers: setTextSize(3) = 18px wide x 24px tall, y=4  (fills 28/32px)
 // Label:   setTextSize(1) = 6px wide  x 8px  tall, y=12 (vertically centered)
 //
-// Pixel budget (128px wide):
+// Pixel budget (128px wide):// Direct solve — no uvEst needed
+// At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
+//           = mv1*1000/uvPerC + cjc1 + offset
+// At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
+// Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
+// Solve for uvPerC:
+float dMv   = mv2 - mv1;           // 3.885
+float dTemp = (temp2 - temp1) - (cjc2 - cjc1);  // (176-21.5) - (25-25) = 154.5
+customUvPerC = (dMv * 1000.0f) / dTemp;
+probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
+
 //   Temp  right-edge  x=54  (3 digits x 18 = 54px, starts x=0)
 //   Gap                     20px  (x=54..74)
 //   Label left-edge   x=55  ON=12px, OFF=18px  ✓
@@ -585,14 +595,17 @@ void setupRoutes() {
     calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
     calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
     
-    // Two-point calibration using the provided CJCs
-    float uvEst = (probeType >= 0 && probeType <= 1) ? PROBE_UV_PER_C[probeType] : PROBE_UV_PER_C[0];
-    float totalMv1 = mv1 + (cjc1 * uvEst / 1000.0f);
-    float totalMv2 = mv2 + (cjc2 * uvEst / 1000.0f);
-    customUvPerC = (totalMv2 - totalMv1) * 1000.0f / (temp2 - temp1);
-    probeOffset  = temp1 - (totalMv1 * 1000.0f / customUvPerC);
-    savePrefs();
-    
+    // Direct solve — no uvEst needed
+    // At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
+    //           = mv1*1000/uvPerC + cjc1 + offset
+    // At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
+    // Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
+    // Solve for uvPerC:
+    float dMv   = mv2 - mv1;           // 3.885
+    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);  // (176-21.5) - (25-25) = 154.5
+    customUvPerC = (dMv * 1000.0f) / dTemp;
+    probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
+
     String response = String("{\"uvPerC\":") + String(customUvPerC, 4)
                     + ",\"offset\":" + String(probeOffset, 4) + "}";
     server.send(200, "application/json", response);
