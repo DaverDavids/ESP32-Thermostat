@@ -62,7 +62,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <h2>&#x1F527; Calibration</h2>
   <div style="margin-bottom:.5rem;">
     <label>Probe Mode
-      <select id="cfgPtype" name="ptype" onchange="updateCalMode(this.value)">
+      <select id="cfgPtype" name="ptype" form="cfgForm" onchange="updateCalMode(this.value)">
         <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
         <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
         <option value="2">Manual calibration</option>
@@ -242,13 +242,7 @@ async function clearCalibration() {
     document.getElementById('calResult').textContent = 'Clear failed: ' + err;
   }
 }
-// Output control helper: POST to /output and refresh state
-function postOutput(mode){
-  fetch('/output', {method:'POST', headers: {'Content-Type':'application/x-www-form-urlencoded'}, body:'mode=' + mode})
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-    .then(() => poll())
-    .catch(e => console.warn('output error', e));
-}
+// (Removed duplicate postOutput helper; use setOutput(mode) instead.)
 function setOutput(mode){
   // New explicit API wrapper for output control
   fetch('/output', {method:'POST', body:new URLSearchParams({mode})}).then(r=>{ if(!r.ok) throw new Error('HTTP ' + r.status); return r.text();}).then(()=>poll()).catch(e=>console.warn('output error', e));
@@ -257,14 +251,7 @@ function updateCalMode(val){
   var el = document.getElementById('calInputs');
   if (el) el.style.display = (val == '2') ? 'block' : 'none';
 }
-// Propagate probe type changes from Calibration card to config
-if (document.getElementById('calPtype')) {
-  document.getElementById('calPtype').addEventListener('change', async e => {
-    const val = e.target.value;
-    await fetch('/config', {method:'POST', body:'ptype=' + val});
-    poll();
-  });
-}
+// Probe type changes are submitted via the config form (no extra listener)
 </script>
 </body>
 </html>
