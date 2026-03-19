@@ -536,7 +536,7 @@ void setupRoutes() {
     float uvPerC = (customUvPerC > 0.0f)
                  ? customUvPerC
                  : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
-    float cjc_C   = temperatureRead();
+    float cjc_C   = temperatureRead() + cjcOffset;
     float cjc_mV  = (cjc_C * uvPerC) / 1000.0f;
     float totalMV = lastShuntMV + cjc_mV;
 

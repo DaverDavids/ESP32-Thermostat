@@ -19,6 +19,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   canvas{width:100%!important;max-height:200px}
   .badge{display:inline-block;padding:.2rem .6rem;border-radius:4px;font-size:.85rem}
   .on{background:#2ecc71}.off{background:#e74c3c}
+  .auto{background:#2980b9}
   #wifiSection{display:none}
 </style>
 </head>
@@ -27,16 +28,16 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 <div class="card">
   <h2>&#x1F321; Live Temperature</h2>
   <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
-  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span> <span id="mode" class="badge">AUTO</span></div>
+  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
   <div style="margin-top:.5rem;font-size:.9rem;color:#aaa;">
     <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
     <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
-<div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
+    <div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
   </div>
-  <div style="margin-top:.5rem;">
-    <button onclick="postOutput('on')">Output On</button>
-    <button onclick="postOutput('off')">Output Off</button>
-    <button onclick="postOutput('auto')">Output Auto</button>
+  <div style="margin-top:.8rem;display:flex;gap:.5rem;">
+    <button onclick="setOutput('on')">Manual ON</button>
+    <button onclick="setOutput('off')" style="background:#555;">Manual OFF</button>
+    <button onclick="setOutput('auto')" style="background:#2980b9;">Auto</button>
   </div>
 </div>
 
@@ -60,24 +61,25 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div class="card">
   <h2>&#x1F527; Calibration</h2>
   <div style="margin-bottom:.5rem;">
-    <label>Probe Type
-      <select id="calPtype" name="ptype">
+    <label>Probe Mode
+      <select id="cfgPtype" name="ptype" onchange="updateCalMode(this.value)">
         <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
         <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
         <option value="2">Manual calibration</option>
       </select>
     </label>
   </div>
+  <div id="calInputs" style="display:block;">
   <form id="calForm">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
       <div>
         <label>Point 1 - mV (mv1)<input type="number" step="0.0001" name="mv1" id="calMv1"></label>
-        <label>Point 1 - CJ C (&deg;C)<input type="number" step="0.1" name="cjc1" id="calCjc1"></label>
+        <label>Point 1 - CJC (&deg;C)<input type="number" step="0.1" name="cjc1" id="calCjc1"></label>
         <label>Point 1 - True Temp (&deg;C)<input type="number" step="0.1" name="temp1" id="calTemp1"></label>
       </div>
       <div>
         <label>Point 2 - mV (mv2)<input type="number" step="0.0001" name="mv2" id="calMv2"></label>
-        <label>Point 2 - CJ C (&deg;C)<input type="number" step="0.1" name="cjc2" id="calCjc2"></label>
+        <label>Point 2 - CJC (&deg;C)<input type="number" step="0.1" name="cjc2" id="calCjc2"></label>
         <label>Point 2 - True Temp (&deg;C)<input type="number" step="0.1" name="temp2" id="calTemp2"></label>
       </div>
     </div>
@@ -87,7 +89,8 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     </div>
   </form>
   <div id="calResult" style="margin-top:.5rem;color:#0f9">--</div>
-</div>
+  </div>
+  </div>
 
 <div class="card">
   <h2>&#x1F4F6; WiFi</h2>
@@ -138,12 +141,12 @@ async function poll() {
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
     document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
     const outEl = document.getElementById('out');
-    outEl.textContent = st.output ? 'ON' : 'OFF';
-    outEl.className = 'badge ' + (st.output ? 'on' : 'off');
-    // Reflect manual/auto + output mode next to output badge
-    if (document.getElementById('mode')) {
-      const modeStr = (st.manual ? 'MANUAL' : 'AUTO') + ' ' + (st.output ? 'ON' : 'OFF');
-      document.getElementById('mode').textContent = modeStr;
+    if (st.manual) {
+      outEl.textContent = st.output ? 'MANUAL ON' : 'MANUAL OFF';
+      outEl.className = 'badge ' + (st.output ? 'on' : 'off');
+    } else {
+      outEl.textContent = st.output ? 'AUTO ON' : 'AUTO OFF';
+      outEl.className = 'badge auto';
     }
     currentSetpoint = st.setpoint;
     // Live fields for CJC and total voltage
@@ -162,7 +165,11 @@ async function poll() {
       document.getElementById('cfgHyst').value  = st.hysteresis;
       document.getElementById('cfgOff').value   = st.offset;
       var pEl = document.getElementById('cfgPtype');
-      if (pEl) pEl.value = st.probeType;
+      if (pEl) {
+        var pVal = (st.customUvPerC > 0) ? 2 : st.probeType;
+        pEl.value = pVal;
+        updateCalMode(pVal);
+      }
     }
     // Prefill CJC offset if available
     if (document.getElementById('cfgCjco')) {
@@ -241,6 +248,14 @@ function postOutput(mode){
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
     .then(() => poll())
     .catch(e => console.warn('output error', e));
+}
+function setOutput(mode){
+  // New explicit API wrapper for output control
+  fetch('/output', {method:'POST', body:new URLSearchParams({mode})}).then(r=>{ if(!r.ok) throw new Error('HTTP ' + r.status); return r.text();}).then(()=>poll()).catch(e=>console.warn('output error', e));
+}
+function updateCalMode(val){
+  var el = document.getElementById('calInputs');
+  if (el) el.style.display = (val == '2') ? 'block' : 'none';
 }
 // Propagate probe type changes from Calibration card to config
 if (document.getElementById('calPtype')) {
