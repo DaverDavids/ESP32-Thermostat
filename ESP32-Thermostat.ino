@@ -206,7 +206,32 @@ void loop() {
 
   unsigned long now = millis();
 
-  // The non-blocking wifi boot path has been removed.
+  // Fast INA219 sample into median buffer
+  if (now - lastFastSample >= FAST_SAMPLE_MS) {
+    lastFastSample = now;
+    medBuf[medCount % MEDIAN_N] = rawTempC();
+    if (medCount < MEDIAN_N) medCount++;
+  }
+
+  // Periodic report with median filter
+  if (now - lastReport >= REPORT_MS) {
+    lastReport = now;
+    if (medCount > 0) {
+      currentTemp = medianOf(medBuf, medCount);
+      lastShuntMV = ina219.getShuntVoltage_mV();
+    }
+    DBG("T: "); DBGLN(currentTemp);
+    tempHistory[histHead] = currentTemp;
+    histHead = (histHead + 1) % HIST_SIZE;
+    if (histCount < HIST_SIZE) histCount++;
+    sampleLog[logHead] = { currentTemp, lastShuntMV };
+    logHead  = (logHead + 1) % LOG_SIZE;
+    if (logCount < LOG_SIZE) logCount++;
+    medCount = 0;
+    if (!manualOverride) controlLoop();
+  }
+
+  // OTA/server loop guarding remains below
 
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
@@ -372,34 +397,27 @@ void updateButtons() {
 }
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
-float readTempC() {
-  lastShuntMV = ina219.getShuntVoltage_mV();
-
+float rawTempC() {
+  float smV   = ina219.getShuntVoltage_mV();
   float cjc_C = temperatureRead();
-
-/*/  const int N = 16;
-  for (int i = 0; i < N; i++) {
-    float raw = ina219.getShuntVoltage_mV();
-    lastShuntMV = (EMA_ALPHA * raw) + ((1.0f - EMA_ALPHA) * lastShuntMV);
-  }
-
-  const int CJC_N = 16;
-  float cjc_C = 0;
-  for (int i = 0; i < CJC_N; i++) cjc_C += temperatureRead();
-  cjc_C /= CJC_N;*/
-
   float uv_per_c = (customUvPerC > 0.0f)
                   ? customUvPerC
                   : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
-  float total_mV = lastShuntMV + cjc_mV;
-  float tC = (total_mV * 1000.0f / uv_per_c) + probeOffset;
+  float total_mV = smV + cjc_mV;
+  lastShuntMV = smV;
+  return (total_mV * 1000.0f / uv_per_c) + probeOffset;
+}
 
-  sampleLog[logHead] = { tC, lastShuntMV };
-  logHead  = (logHead + 1) % LOG_SIZE;
-  if (logCount < LOG_SIZE) logCount++;
-
-  return tC;
+float medianOf(float* arr, uint8_t n) {
+  float tmp[MEDIAN_N];
+  for (uint8_t i = 0; i < n; i++) tmp[i] = arr[i];
+  for (uint8_t i = 1; i < n; i++) {
+    float key = tmp[i]; int8_t j = i - 1;
+    while (j >= 0 && tmp[j] > key) { tmp[j+1] = tmp[j]; j--; }
+    tmp[j+1] = key;
+  }
+  return tmp[n/2];
 }
 
 // ─── Bang-bang control ────────────────────────────────────────────────────────
