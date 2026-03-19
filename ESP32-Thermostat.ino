@@ -91,6 +91,8 @@ float    calMv1          =  0.0f;   // raw mV point 1 for calibration
 float    calTemp1        =  0.0f;   // raw temp point 1 for calibration
 float    calMv2          =  0.0f;   // raw mV point 2 for calibration
 float    calTemp2        =  0.0f;   // raw temp point 2 for calibration
+float    calCjc1         =  0.0f;
+float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
@@ -233,8 +235,6 @@ void loop() {
     medCount = 0;
     if (!manualOverride) controlLoop();
   }
-
-  // OTA/server loop guarding remains below
 
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
@@ -475,6 +475,8 @@ void loadPrefs() {
   calTemp1      = prefs.getFloat ("t1",      0.0);
   calMv2        = prefs.getFloat ("mv2",     0.0);
   calTemp2      = prefs.getFloat ("t2",      0.0);
+  calCjc1       = prefs.getFloat ("cjc1",    0.0);
+  calCjc2       = prefs.getFloat ("cjc2",    0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",   MYPSK);
   prefs.end();
@@ -487,6 +489,8 @@ void savePrefs() {
   prefs.putFloat ("off",   probeOffset);
   prefs.putInt   ("ptype", probeType);
   prefs.putFloat ("uvpc",  customUvPerC);
+  prefs.putFloat ("cjc1",  calCjc1);
+  prefs.putFloat ("cjc2",  calCjc2);
   prefs.putFloat ("mv1",   calMv1);
   prefs.putFloat ("t1",    calTemp1);
   prefs.putFloat ("mv2",   calMv2);
