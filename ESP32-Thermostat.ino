@@ -50,7 +50,6 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 // Non-blocking WiFi boot delay scheduling
 unsigned long wifiBootStartMs = 0;
 bool wifiBootDelayCompleted = true;
-bool wifiBootDelayActive = (WIFI_BOOT_DELAY_MS > 0);
 unsigned long wifiConnectStartMs = 0;
 bool wifiConnecting = false;
 
@@ -115,6 +114,9 @@ unsigned long lastSample        = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
+// Track whether OTA/server have been started to avoid early binds
+bool otaStarted   = false;
+bool serverStarted = false;
 
 // ─── Button state ─────────────────────────────────────────────────────────────
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
@@ -195,18 +197,13 @@ void setup() {
   }
   display.display();
   bootTime = millis();
-
-  setupOTA();
-  setupRoutes();
-  server.begin();
+  // OTA and Web server startup will be done after WiFi connects in onWifiConnect()
   DBGLN("Ready");
 }
 
 // ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
   if (apMode) dns.processNextRequest();
-  ArduinoOTA.handle();
-  server.handleClient();
   updateButtons();
 
   unsigned long now = millis();
@@ -232,6 +229,10 @@ void loop() {
       wifiConnecting = false;
     }
   }
+
+  // Guard OTA/server loop calls until they're started
+  if (otaStarted) ArduinoOTA.handle();
+  if (serverStarted) server.handleClient();
 
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
@@ -459,6 +460,12 @@ void onWifiConnect() {
   if (MDNS.begin(HOSTNAME)) {
     DBGLN(String("mDNS: ") + HOSTNAME + ".local");
   }
+  // Start OTA and WebServer after WiFi is up
+  setupOTA();
+  setupRoutes();
+  server.begin();
+  otaStarted = true;
+  serverStarted = true;
 }
 
 // ─── OTA ──────────────────────────────────────────────────────────────────────
