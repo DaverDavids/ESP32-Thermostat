@@ -95,7 +95,6 @@ String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
-const float EMA_ALPHA = 1.0f;
 
 #define HIST_SIZE 720
 float    tempHistory[HIST_SIZE];
@@ -109,7 +108,8 @@ SampleLog sampleLog[LOG_SIZE];
 uint16_t logHead  = 0;
 uint16_t logCount = 0;
 
-unsigned long lastSample        = 0;
+unsigned long lastReport        = 0;
+unsigned long lastFastSample    = 0;
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
@@ -167,18 +167,17 @@ void setup() {
     DBGLN("OLED ready");
   }
 
+  // Blocking WiFi connect (restore original behavior)
   loadPrefs();
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
   delay(100);
-  // Non-blocking WiFi boot scheduling
-  wifiBootStartMs = millis();
-  wifiBootDelayCompleted = (WIFI_BOOT_DELAY_MS == 0);
-  if (wifiBootDelayCompleted) {
-    startSTA();
-    wifiConnectStartMs = millis();
-    wifiConnecting = true;
+  startSTA();
+  unsigned long t = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
+    delay(250); DBG(".");
   }
+  WiFi.status() == WL_CONNECTED ? onWifiConnect() : (DBGLN("\nSTA timeout"), startAP());
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -207,31 +206,7 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Non-blocking WiFi boot delay progress
-  if (!wifiBootDelayCompleted) {
-    if (now - wifiBootStartMs >= WIFI_BOOT_DELAY_MS) {
-      wifiBootDelayCompleted = true;
-      startSTA();
-      wifiConnectStartMs = now;
-      wifiConnecting = true;
-    }
-  }
-
-  // Non-blocking WiFi connect progress
-  if (wifiConnecting) {
-    if (WiFi.status() == WL_CONNECTED) {
-      onWifiConnect();
-      wifiConnecting = false;
-    } else if (now - wifiConnectStartMs > WIFI_TIMEOUT_MS) {
-      // Timeout: fallback to AP mode like before
-      startAP();
-      wifiConnecting = false;
-    }
-  }
-
-  // Guard OTA/server loop calls until they're started
-  if (otaStarted) ArduinoOTA.handle();
-  if (serverStarted) server.handleClient();
+  // The non-blocking wifi boot path has been removed.
 
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
