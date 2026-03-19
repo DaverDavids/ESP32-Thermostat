@@ -25,8 +25,8 @@
 const uint8_t PIN_MOSFET  =  3;
 const uint8_t PIN_SDA     =  8;
 const uint8_t PIN_SCL     =  9;
-const uint8_t PIN_BTN_UP  =  4;
-const uint8_t PIN_BTN_DN  =  6;
+const uint8_t PIN_BTN_UP  =  6;
+const uint8_t PIN_BTN_DN  =  4;
 const uint8_t PIN_BTN_CTR =  5;
 
 // outputOn=true  -> PIN_MOSFET LOW  (active-low load)
@@ -50,8 +50,8 @@ const uint32_t FAST_SAMPLE_MS = 20;   // INA219 poll rate (50Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
 // Outlier rejection and dropout thresholds
-const float OUTLIER_MAX_JUMP = 80.0f; // °C max change between samples
-const float SHUNT_MIN_MV      = 0.3f;  // below this = dropout
+const float OUTLIER_MAX_JUMP = 150.0f; // °C max change between samples
+const float SHUNT_MIN_MV      = -5.0f;  // below this = dropout
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
 #define MEDIAN_N 9          // must be odd; 9 × 20ms = 180ms window
@@ -67,7 +67,7 @@ const uint32_t CTR_LONGPRESS_MS = 2000;  // hold time to change state
 const uint32_t RAMP_DELAY_MS        =  200;
 const uint32_t RAMP_RATE_INITIAL_MS =  100;
 const uint32_t RAMP_RATE_MIN_MS     =    1;
-const float    RAMP_ACCEL           = 1.0f;
+const float    RAMP_ACCEL           = 0.75f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
