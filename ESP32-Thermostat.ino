@@ -364,30 +364,25 @@ void updateButtons() {
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float readTempC() {
-  const int N = 16;
-  float buf[N];
-  for (int i = 0; i < N; i++) buf[i] = ina219.getShuntVoltage_mV();
-  // insertion sort
-  for (int i = 1; i < N; i++) {
-    float key = buf[i]; int j = i - 1;
-    while (j >= 0 && buf[j] > key) { buf[j+1] = buf[j]; j--; }
-    buf[j+1] = key;
-  }
-  // average middle 8 (discard top 4 and bottom 4)
+  const int N = 4;
   float shuntmV = 0;
-  for (int i = 4; i < 12; i++) shuntmV += buf[i];
-  shuntmV /= 8.0f;
-  
-  lastShuntMV = shuntmV; // store averaged shunt voltage for use by UI and status
-  float cjc_C    = temperatureRead();
+  for (int i = 0; i < N; i++) shuntmV += ina219.getShuntVoltage_mV();
+  shuntmV /= N;
+
+  lastShuntMV = shuntmV;
+
+  const int CJC_N = 16;
+  float cjc_C = 0;
+  for (int i = 0; i < CJC_N; i++) cjc_C += temperatureRead();
+  cjc_C /= CJC_N;
+
   float uv_per_c = (customUvPerC > 0.0f)
                   ? customUvPerC
                   : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
   float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
   float total_mV = lastShuntMV + cjc_mV;
-  // Compute calibrated temperature
   float tC = (total_mV * 1000.0f / uv_per_c) + probeOffset;
-  // Push log entry
+
   sampleLog[logHead] = { tC, lastShuntMV };
   logHead  = (logHead + 1) % LOG_SIZE;
   if (logCount < LOG_SIZE) logCount++;
@@ -482,7 +477,7 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-  float shuntMV    = lastShuntMV;
+    float shuntMV = lastShuntMV;
     float uvPerC     = (customUvPerC > 0.0f)
                      ? customUvPerC
                      : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
