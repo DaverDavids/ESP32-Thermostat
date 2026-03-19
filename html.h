@@ -88,7 +88,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       <button type="button" onclick="clearCalibration()" style="background:#a33;">Clear Calibration</button>
     </div>
   </form>
-  <div id="calResult" style="margin-top:.5rem;color:#0f9">--</div>
+  <div id="calResult" style="margin-top:.5rem;color:#0f9"></div>
   </div>
   </div>
 
@@ -171,17 +171,20 @@ async function poll() {
         updateCalMode(pVal);
       }
     }
-    // Prefill CJC offset if available
-    if (document.getElementById('cfgCjco')) {
-      document.getElementById('cfgCjco').value = st.cjcOffset;
+    // Always show current calibration result
+    const calResultEl = document.getElementById('calResult');
+    if (st.customUvPerC > 0) {
+      calResultEl.textContent = 'Calibrated uV/°C = ' + st.customUvPerC.toFixed(4) + ', Offset = ' + st.offset.toFixed(4);
+    } else {
+      calResultEl.textContent = '';
     }
     // Pre-fill calibration form with saved points on first load; also include CJCs
     if (document.getElementById('calMv1').value === "") {
       document.getElementById('calMv1').value   = st.calMv1;
-      document.getElementById('calCjc1').value  = st.calCjc1;
+      document.getElementById('calCjc1').value  = st.cjcC.toFixed(1);
       document.getElementById('calTemp1').value = st.calTemp1;
       document.getElementById('calMv2').value   = st.calMv2;
-      document.getElementById('calCjc2').value  = st.calCjc2;
+      document.getElementById('calCjc2').value  = st.cjcC.toFixed(1);
       document.getElementById('calTemp2').value = st.calTemp2;
     // Prefill calibration probe type if available
     }
