@@ -44,6 +44,15 @@ const char*    HOSTNAME        = "thermostat";
 const uint32_t WIFI_TIMEOUT_MS =  20000;
 const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
+// WiFi boot delay (ms). Set to 0 to disable and keep default behavior.
+// Example: 20000 for 20 seconds after boot.
+#define WIFI_BOOT_DELAY_MS 20000
+// Non-blocking WiFi boot delay scheduling
+unsigned long wifiBootStartMs = 0;
+bool wifiBootDelayCompleted = true;
+bool wifiBootDelayActive = (WIFI_BOOT_DELAY_MS > 0);
+unsigned long wifiConnectStartMs = 0;
+bool wifiConnecting = false;
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
 const uint32_t SAMPLE_MS  = 1000;
@@ -161,12 +170,14 @@ void setup() {
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
   delay(100);
-  startSTA();
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
-    delay(250); DBG(".");
+  // Non-blocking WiFi boot scheduling
+  wifiBootStartMs = millis();
+  wifiBootDelayCompleted = (WIFI_BOOT_DELAY_MS == 0);
+  if (wifiBootDelayCompleted) {
+    startSTA();
+    wifiConnectStartMs = millis();
+    wifiConnecting = true;
   }
-  WiFi.status() == WL_CONNECTED ? onWifiConnect() : (DBGLN("\nSTA timeout"), startAP());
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -199,6 +210,28 @@ void loop() {
   updateButtons();
 
   unsigned long now = millis();
+
+  // Non-blocking WiFi boot delay progress
+  if (!wifiBootDelayCompleted) {
+    if (now - wifiBootStartMs >= WIFI_BOOT_DELAY_MS) {
+      wifiBootDelayCompleted = true;
+      startSTA();
+      wifiConnectStartMs = now;
+      wifiConnecting = true;
+    }
+  }
+
+  // Non-blocking WiFi connect progress
+  if (wifiConnecting) {
+    if (WiFi.status() == WL_CONNECTED) {
+      onWifiConnect();
+      wifiConnecting = false;
+    } else if (now - wifiConnectStartMs > WIFI_TIMEOUT_MS) {
+      // Timeout: fallback to AP mode like before
+      startAP();
+      wifiConnecting = false;
+    }
+  }
 
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
