@@ -31,7 +31,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div style="margin-top:.5rem;font-size:.9rem;color:#aaa;">
     <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
     <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
-    <div>Total voltage (with JC): <span id="totalMV">--</span> mV</div>
+<div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
   </div>
 </div>
 
@@ -127,7 +127,6 @@ async function poll() {
     ]);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
-    document.getElementById('rawMv').textContent = st.shuntMV.toFixed(4);
     document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
     const outEl = document.getElementById('out');
     outEl.textContent = st.output ? 'ON' : 'OFF';
