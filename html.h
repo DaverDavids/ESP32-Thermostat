@@ -407,7 +407,7 @@ document.getElementById('profileForm').addEventListener('submit', async e => {
 });
 
 // ── Profile library ───────────────────────────────────────────────────────────
-async function refreshProfileList() {
+async function refreshProfileList(activeProfileName) {
   try {
     const names = await fetch('/profiles').then(r => r.json());
     const sel   = document.getElementById('profileLibSelect');
@@ -420,9 +420,8 @@ async function refreshProfileList() {
       sel.appendChild(opt);
     });
     const nameInput = document.getElementById('saveProfileName');
-    if (!nameInput.value) {
-      const p = await fetch('/profile').then(r => r.json());
-      nameInput.value = p.name;
+    if (!nameInput.value && activeProfileName) {
+      nameInput.value = activeProfileName;
     }
   } catch(e) {
     document.getElementById('profileLibMsg').textContent = 'List failed: ' + e;
@@ -494,12 +493,10 @@ async function startRun() {
   await dbClear();
   drawRunChart();
   await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode === 'autoramp' ? 'autoramp' : 'bangbang', action:'start'})});
-  poll();
 }
 
 async function stopRun() {
   await fetch('/run', {method:'POST', body: new URLSearchParams({action:'stop'})});
-  poll();
 }
 
 // ── Run chart ─────────────────────────────────────────────────────────────────
@@ -510,8 +507,9 @@ function drawRunChart() {
   dbGetAll().then(rows => {
     const c   = document.getElementById('runChart');
     if (!c) return;
-    const w   = c.width  = c.offsetWidth;
-    const h   = c.height = 220;
+    const w = c.offsetWidth || 300;
+    c.width  = w;
+    c.height = 220;
     const ctx = c.getContext('2d');
     ctx.clearRect(0, 0, w, h);
 
@@ -598,15 +596,19 @@ async function showRunSummary(learnedSteps, stepTargets) {
 
   learnedSteps.forEach((s, i) => {
     const tgt      = (stepTargets && stepTargets[i] !== undefined) ? stepTargets[i] : s.target || '--';
-    const overshoot = (typeof s.peak === 'number' && typeof tgt === 'number')
-      ? (s.peak - tgt).toFixed(1)
-      : '--';
-    const ovColor  = parseFloat(overshoot) > 10 ? '#e74c3c' : (parseFloat(overshoot) > 3 ? '#f39c12' : '#0f9');
+    const overshootVal = (typeof s.peak === 'number' && typeof tgt === 'number')
+      ? (s.peak - tgt)
+      : null;
+    const overshoot = overshootVal !== null ? overshootVal.toFixed(1) : '--';
+    const ovColor   = overshootVal === null ? '#aaa'
+      : overshootVal > 10 ? '#e74c3c'
+      : overshootVal > 3  ? '#f39c12'
+      : '#0f9';
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${i + 1}</td>`
       + `<td style="text-align:right">${typeof tgt === 'number' ? tgt.toFixed(0) : tgt}&deg;C</td>`
       + `<td style="text-align:right">${s.peak.toFixed(0)}&deg;C</td>`
-      + `<td style="text-align:right;color:${ovColor}">${overshoot > 0 ? '+' : ''}${overshoot}&deg;C</td>`
+      + `<td style="text-align:right;color:${ovColor}">${(overshootVal !== null && overshootVal > 0) ? '+' : ''}${overshoot}&deg;C</td>`
       + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`
       + `<td style="text-align:right">${s.fireStart.toFixed(0)}&deg;C</td>`
       + `<td style="text-align:right">${s.cutoff.toFixed(0)}&deg;C</td>`;
@@ -798,8 +800,9 @@ async function pollRamp() {
 setInterval(poll, 1000);
 openDB().then(() => {
   updateLogInfo();
-  loadProfileFromDevice();
-  refreshProfileList();
+  loadProfileFromDevice().then(() => {
+    refreshProfileList(document.getElementById('profName').value);
+  });
   poll();
 });
 
