@@ -603,8 +603,6 @@ void rampControlLoop() {
       resetStabilityBuf();
       outputOn = true;
       MOSFET_WRITE(true);
-      stepTarget  = activeProfile.stepTargets[0];
-      isFinalStep = (activeProfile.stepCount == 1);
       DBGLN("Ramp: HEATING step 0");
       break;
 
@@ -836,11 +834,12 @@ void setupRoutes() {
     String learned = "[";
     for (uint8_t i = 0; i < learnedCount; i++) {
       if (i) learned += ",";
-      learned += "{\"step\":"       + String(i)
-               + ",\"fireStart\":" + String(learnedFireStartTemp[i], 1)
-               + ",\"cutoff\":"    + String(learnedCutoffTemp[i],    1)
-               + ",\"peak\":"      + String(learnedPeakTemp[i],      1)
-               + ",\"coastRatio\":" + String(learnedCoastRatio[i],   4)
+      learned += "{\"step\":"        + String(i)
+               + ",\"target\":"      + String(activeProfile.stepTargets[i], 1)
+               + ",\"fireStart\":"   + String(learnedFireStartTemp[i], 1)
+               + ",\"cutoff\":"      + String(learnedCutoffTemp[i],    1)
+               + ",\"peak\":"        + String(learnedPeakTemp[i],      1)
+               + ",\"coastRatio\":"  + String(learnedCoastRatio[i],   4)
                + "}";
     }
     learned += "]";

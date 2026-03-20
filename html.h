@@ -73,7 +73,16 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     </table>
     <div style="margin-top:.8rem;">
       <strong style="color:#aaa;font-size:.85rem;">Learned Steps</strong>
-      <table id="learnedBody" style="width:100%;font-size:.8rem;margin-top:.3rem;border-collapse:collapse;"></table>
+      <table id="learnedTable" style="width:100%;font-size:.8rem;margin-top:.3rem;border-collapse:collapse;">
+        <thead><tr>
+          <th style="text-align:left;color:#aaa;">Step</th>
+          <th style="text-align:right;color:#aaa;">FireStart</th>
+          <th style="text-align:right;color:#aaa;">Cutoff</th>
+          <th style="text-align:right;color:#aaa;">Peak</th>
+          <th style="text-align:right;color:#aaa;">CoastR</th>
+        </tr></thead>
+        <tbody id="learnedBody"></tbody>
+      </table>
     </div>
   </div>
 
@@ -303,6 +312,39 @@ async function exportCSV() {
 }
 
 // ── Run control ───────────────────────────────────────────────────────────────
+document.getElementById('runModeSelect').addEventListener('change', function() {
+  const isRamp = this.value === 'autoramp';
+  document.getElementById('rampPanel').style.display    = isRamp ? 'block' : 'none';
+  document.getElementById('profilePanel').style.display = isRamp ? 'block' : 'none';
+});
+
+async function loadProfileFromDevice() {
+  try {
+    const p = await fetch('/profile').then(r => r.json());
+    document.getElementById('profName').value       = p.name;
+    document.getElementById('profSteps').value      = p.stepTargets.join(',');
+    document.getElementById('profSoak').value       = p.soakMinutes;
+    document.getElementById('profStability').value  = p.stabilityThresh;
+    document.getElementById('profCoastBase').value  = p.coastBase;
+    document.getElementById('profCoastSlope').value = p.coastSlope;
+    document.getElementById('profileMsg').textContent = 'Loaded from device.';
+  } catch(e) {
+    document.getElementById('profileMsg').textContent = 'Load failed: ' + e;
+  }
+}
+
+document.getElementById('profileForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const p = new URLSearchParams(new FormData(e.target));
+  try {
+    const r = await fetch('/profile', {method:'POST', body: p});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    document.getElementById('profileMsg').textContent = 'Applied to device.';
+  } catch(e) {
+    document.getElementById('profileMsg').textContent = 'Apply failed: ' + e;
+  }
+});
+
 async function startRun() {
   const mode = document.getElementById('runModeSelect').value;
   await dbClear();
@@ -405,12 +447,9 @@ async function poll() {
 
     // Sync log if run active
     if (st.runActive) syncLog();
-    // Ramp status polling (Stage 2) - only in autoramp mode
-    if (document.getElementById('runModeSelect')) {
-      if (document.getElementById('runModeSelect').value === 'autoramp') {
-        // Fire ramp status request in the same cycle
-        pollRamp();
-      }
+    // Ramp status polling (Stage 2) - only in autoramp mode when run is active
+    if (st.runActive && document.getElementById('runModeSelect').value === 'autoramp') {
+      pollRamp();
     }
   } catch(e) { console.warn('poll error', e); }
 }
@@ -469,7 +508,7 @@ async function pollRamp() {
           tr.innerHTML = `<td>${idx + 1}</td>`
             + `<td style="text-align:right">${s.fireStart.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.cutoff.toFixed(0)}\u00B0C</td>`
-            + `<td style="text-align:right;color:${s.peak > rs.stepTarget+10 ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right;color:${s.peak > s.target+10 ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`;
           tbody.appendChild(tr);
         });
