@@ -6,6 +6,7 @@
 #include <Preferences.h>
 #include <DNSServer.h>
 #include <Wire.h>
+#include <SPIFFS.h>
 #include <Adafruit_INA219.h>
 #include <Adafruit_SSD1306.h>
 #include "html.h"
@@ -46,22 +47,21 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (50Hz)
+const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (~37Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
-// Outlier rejection and dropout thresholds
-const float OUTLIER_MAX_JUMP = 150.0f; // °C max change between samples
-const float SHUNT_MIN_MV      = -5.0f;  // below this = dropout
+const float    OUTLIER_MAX_JUMP = 150.0f;
+const float    SHUNT_MIN_MV     =  -5.0f;
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
-#define MEDIAN_N 9          // must be odd; 9 × 20ms = 180ms window
+#define MEDIAN_N 9
 float   medBuf[MEDIAN_N];
 uint8_t medCount = 0;
 unsigned long lastFastSample = 0;
 
-// ─── Button debounce / long-press ──────────────────────────────────────────────
+// ─── Button debounce / long-press ────────────────────────────────────────────
 const uint32_t DEBOUNCE_MS      =   30;
-const uint32_t CTR_LONGPRESS_MS = 2000;  // hold time to change state
+const uint32_t CTR_LONGPRESS_MS = 2000;
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  200;
@@ -71,6 +71,68 @@ const float    RAMP_ACCEL           = 0.75f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
+
+// ─── Run modes ────────────────────────────────────────────────────────────────
+// MODE_BANG_BANG : existing hysteresis control (manualOverride=false)
+// MODE_AUTO_RAMP : new staged ramp (Stage 2+)
+enum RunMode { MODE_BANG_BANG = 0, MODE_AUTO_RAMP = 1 };
+RunMode runMode = MODE_BANG_BANG;
+
+// ─── SPIFFS run log ───────────────────────────────────────────────────────────
+// Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
+// OR bang-bang auto active). Columns:
+//   t_s, tempC, setpoint, output, mode, ramp_state, step_idx, coast_ratio_est
+// ramp_state and step_idx are placeholders (0) until Stage 2.
+static const char* LOG_PATH = "/runlog.csv";
+bool     spiffsOk   = false;
+bool     runActive  = false;   // true when a timed run is in progress
+unsigned long runStartMs = 0;
+
+// Short RAM cache: 64 most-recent samples for fast /log?since= serving
+#define CACHE_SIZE 64
+struct CacheSample {
+  uint32_t t_s;
+  float    tC;
+  float    sp;
+  uint8_t  output;
+  uint8_t  mode;         // RunMode value
+  uint8_t  ramp_state;   // 0 = not ramp (Stage 2 will populate)
+  uint8_t  step_idx;
+  float    coast_ratio;
+};
+CacheSample sampleCache[CACHE_SIZE];
+uint16_t cacheHead  = 0;
+uint16_t cacheCount = 0;
+
+void openRunLog() {
+  if (!spiffsOk) return;
+  File f = SPIFFS.open(LOG_PATH, FILE_WRITE);
+  if (!f) { DBGLN("SPIFFS open failed"); return; }
+  f.println("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est");
+  f.close();
+  DBGLN("Run log opened");
+}
+
+void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
+                  uint8_t mode, uint8_t ramp_state, uint8_t step_idx, float coast_ratio) {
+  // Always update RAM cache
+  sampleCache[cacheHead % CACHE_SIZE] = { t_s, tC, sp, output, mode, ramp_state, step_idx, coast_ratio };
+  cacheHead++;
+  if (cacheCount < CACHE_SIZE) cacheCount++;
+
+  if (!spiffsOk) return;
+  File f = SPIFFS.open(LOG_PATH, FILE_APPEND);
+  if (!f) return;
+  f.print(t_s);          f.print(',');
+  f.print(tC, 2);        f.print(',');
+  f.print(sp, 1);        f.print(',');
+  f.print(output);       f.print(',');
+  f.print(mode);         f.print(',');
+  f.print(ramp_state);   f.print(',');
+  f.print(step_idx);     f.print(',');
+  f.println(coast_ratio, 4);
+  f.close();
+}
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
@@ -82,20 +144,20 @@ Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
 float    lastShuntMV =   0.0f;
-float    lastGoodTemp   = NAN;   // for outlier rejection
-bool     outputOn       = false;  // relay off at boot
+float    lastGoodTemp   = NAN;
+bool     outputOn       = false;
 bool     apMode         = false;
 bool     manualOverride = true;   // boot into manual OFF
 
 float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
 int      probeType       =  0;
-float    customUvPerC    =  0.0f; // overrides probe type calibration when >0
-float    cjcOffset       = -12.0f; // die temp offset; default -12C
-float    calMv1          =  0.0f;   // raw mV point 1 for calibration
-float    calTemp1        =  0.0f;   // raw temp point 1 for calibration
-float    calMv2          =  0.0f;   // raw mV point 2 for calibration
-float    calTemp2        =  0.0f;   // raw temp point 2 for calibration
+float    customUvPerC    =  0.0f;
+float    cjcOffset       = -12.0f;
+float    calMv1          =  0.0f;
+float    calTemp1        =  0.0f;
+float    calMv2          =  0.0f;
+float    calTemp2        =  0.0f;
 float    calCjc1         =  0.0f;
 float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
@@ -108,25 +170,15 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
-// NEW: log buffer for samples
-struct SampleLog { float tC; float shuntmV; };
-#define LOG_SIZE 256
-SampleLog sampleLog[LOG_SIZE];
-uint16_t logHead  = 0;
-uint16_t logCount = 0;
-
 unsigned long lastReport        = 0;
-// removed duplicate global lastFastSample; keep the one in the fast-sampling block
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
-// Track whether OTA/server have been started to avoid early binds
-bool otaStarted   = false;
+bool otaStarted    = false;
 bool serverStarted = false;
 
 // ─── Button state ─────────────────────────────────────────────────────────────
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
-
 struct BtnState {
   uint8_t   pin;
   BtnPhase  phase;
@@ -140,8 +192,11 @@ struct BtnState {
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
-float rawTempC(); float medianOf(float* arr, uint8_t n); void controlLoop();
+float rawTempC(); float medianOf(float* arr, uint8_t n);
+void controlLoop();
 void updateButtons(); void updateDisplay();
+void openRunLog();
+void appendRunLog(uint32_t, float, float, uint8_t, uint8_t, uint8_t, uint8_t, float);
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
@@ -174,7 +229,11 @@ void setup() {
     DBGLN("OLED ready");
   }
 
-  // Blocking WiFi connect (restore original behavior)
+  // SPIFFS
+  spiffsOk = SPIFFS.begin(true);
+  if (spiffsOk) { DBGLN("SPIFFS ready"); }
+  else          { DBGLN("SPIFFS failed - logging to RAM cache only"); }
+
   loadPrefs();
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
@@ -202,7 +261,6 @@ void setup() {
   }
   display.display();
   bootTime = millis();
-  // OTA and Web server startup will be done after WiFi connects in onWifiConnect()
   DBGLN("Ready");
 }
 
@@ -210,20 +268,17 @@ void setup() {
 void loop() {
   if (apMode) dns.processNextRequest();
   updateButtons();
-  // OTA/Server loop handling (start-up guarded elsewhere)
-  if (otaStarted) ArduinoOTA.handle();
+  if (otaStarted)   ArduinoOTA.handle();
   if (serverStarted) server.handleClient();
 
   unsigned long now = millis();
 
-  // Fast INA219 sample into median buffer
   if (now - lastFastSample >= FAST_SAMPLE_MS) {
     lastFastSample = now;
     medBuf[medCount % MEDIAN_N] = rawTempC();
     if (medCount < MEDIAN_N) medCount++;
   }
 
-  // Periodic report with median filter
   if (now - lastReport >= REPORT_MS) {
     lastReport = now;
     if (medCount > 0) {
@@ -231,16 +286,26 @@ void loop() {
       lastShuntMV = ina219.getShuntVoltage_mV();
     }
     DBG("T: "); DBGLN(currentTemp);
+
+    // history ring buffer (unchanged)
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
-    sampleLog[logHead] = { currentTemp, lastShuntMV };
-    logHead  = (logHead + 1) % LOG_SIZE;
-    if (logCount < LOG_SIZE) logCount++;
+
     medCount = 0;
+
+    // Control
     if (!manualOverride) controlLoop();
+
+    // Log if run is active (auto mode running)
+    if (runActive) {
+      uint32_t t_s = (uint32_t)((now - runStartMs) / 1000UL);
+      appendRunLog(t_s, currentTemp, setpoint, outputOn ? 1 : 0,
+                   (uint8_t)runMode, 0, 0, 0.0f);
+    }
   }
 
+  // Button hold ramp for setpoint
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
     btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
@@ -248,7 +313,6 @@ void loop() {
     btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
     savePrefs();
   }
-
   if (btns[1].phase == BTN_HELD && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
     btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
@@ -274,46 +338,24 @@ void loop() {
     }
   }
 
-  // Stale: removed old single-sample path (readTempC) and related scheduling
-
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
-    if (now - bootTime >= IP_SPLASH_MS) {
-      updateDisplay();
-    }
+    if (now - bootTime >= IP_SPLASH_MS) updateDisplay();
   }
 }
 
 // ─── Display ──────────────────────────────────────────────────────────────────
-//
-// Numbers: setTextSize(3) = 18px wide x 24px tall, y=4  (fills 28/32px)
-// Label:   setTextSize(1) = 6px wide  x 8px  tall, y=12 (vertically centered)
-//
-// Pixel budget (128px wide):// Direct solve — no uvEst needed
-// At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
-//           = mv1*1000/uvPerC + cjc1 + offset
-// At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
-// Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
-// Solve for uvPerC:
-
-
-//   Temp  right-edge  x=54  (3 digits x 18 = 54px, starts x=0)
-//   Gap                     20px  (x=54..74)
-//   Label left-edge   x=55  ON=12px, OFF=18px  ✓
-//   Setpoint left     x=74  (3 digits x 18 = 54px, ends x=128)  ✓
-//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  const int NUM_Y   =  4;   // size-3 numbers top
-  const int LBL_Y   = 12;   // size-1 label top (vertically centered in 32px)
-  const int NUM_CW  = 18;   // size-3 char width
-  const int T_REDGE = 54;   // right edge of temp field
-  const int LBL_X   = 55;   // left edge of label
-  const int SP_X    = 74;   // left edge of setpoint
+  const int NUM_Y   =  4;
+  const int LBL_Y   = 12;
+  const int NUM_CW  = 18;
+  const int T_REDGE = 54;
+  const int LBL_X   = 55;
+  const int SP_X    = 74;
 
-  // ─ Temp: size 3, right-aligned
   display.setTextSize(3);
   String tempStr = String((int)round(currentTemp));
   int tempX = T_REDGE - (int)tempStr.length() * NUM_CW;
@@ -321,14 +363,12 @@ void updateDisplay() {
   display.setCursor(tempX, NUM_Y);
   display.print(tempStr);
 
-  // ─ Center label: size 1, only in manual override
   if (manualOverride) {
     display.setTextSize(1);
     display.setCursor(LBL_X, LBL_Y);
     display.print(outputOn ? "ON" : "OFF");
   }
 
-  // ─ Setpoint: size 3, left-aligned
   display.setTextSize(3);
   display.setCursor(SP_X, NUM_Y);
   display.print((int)round(setpoint));
@@ -337,27 +377,14 @@ void updateDisplay() {
 }
 
 // ─── Button handling ──────────────────────────────────────────────────────────
-//
-// UP / DN: short press + hold ramps setpoint (unchanged)
-// CENTER:  must hold CTR_LONGPRESS_MS (2s) to change state
-//   manual OFF -> manual ON
-//   manual ON  -> manual OFF
-//   manual OFF -> auto
-//
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
     bool low = !digitalRead(btns[i].pin);
-
     switch (btns[i].phase) {
-
       case BTN_IDLE:
-        if (low) {
-          btns[i].phase        = BTN_PENDING;
-          btns[i].pendingSince = now;
-        }
+        if (low) { btns[i].phase = BTN_PENDING; btns[i].pendingSince = now; }
         break;
-
       case BTN_PENDING:
         if (!low) {
           btns[i].phase = BTN_IDLE;
@@ -365,33 +392,23 @@ void updateButtons() {
           btns[i].phase           = BTN_HELD;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
-          // UP/DN fire immediately after ramp delay; CENTER waits for long press
           btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
-
-          // UP / DN: first step on confirm
           if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
           if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
-          // CENTER: action deferred until nextFire (long press)
         }
         break;
-
       case BTN_HELD:
         if (!low) {
-          // released before long press fired for center
           btns[i].phase           = BTN_IDLE;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
         } else if (i == 2 && now >= btns[i].nextFire) {
-          // CENTER long press fired
-          btns[i].nextFire = ULONG_MAX;  // prevent re-fire while still held
+          btns[i].nextFire = ULONG_MAX;
           if (!manualOverride) {
-            manualOverride = true;
-            outputOn       = true;
-            MOSFET_WRITE(true);
+            manualOverride = true; outputOn = true; MOSFET_WRITE(true);
             DBGLN("Manual ON");
           } else if (outputOn) {
-            outputOn = false;
-            MOSFET_WRITE(false);
+            outputOn = false; MOSFET_WRITE(false);
             DBGLN("Manual OFF");
           } else {
             manualOverride = false;
@@ -414,17 +431,14 @@ float rawTempC() {
   float total_mV = smV + cjc_mV;
   float candidate = (total_mV * 1000.0f / uv_per_c) + probeOffset;
 
-  // Reject if shunt is below noise floor (probe dropout)
   if (smV < SHUNT_MIN_MV) {
     DBG("Dropout smV="); DBGLN(smV);
     return isnan(lastGoodTemp) ? cjc_C : lastGoodTemp;
   }
-  // Reject if jump is implausibly large (but allow on first reading)
   if (!isnan(lastGoodTemp) && fabsf(candidate - lastGoodTemp) > OUTLIER_MAX_JUMP) {
     DBG("Jump reject: "); DBGLN(candidate);
     return lastGoodTemp;
   }
-
   lastShuntMV  = smV;
   lastGoodTemp = candidate;
   return candidate;
@@ -470,14 +484,11 @@ void onWifiConnect() {
   apMode = false;
   DBG("\nIP: "); DBGLN(WiFi.localIP());
   MDNS.end();
-  if (MDNS.begin(HOSTNAME)) {
-    DBGLN(String("mDNS: ") + HOSTNAME + ".local");
-  }
-  // Start OTA and WebServer after WiFi is up
+  if (MDNS.begin(HOSTNAME)) DBGLN(String("mDNS: ") + HOSTNAME + ".local");
   setupOTA();
   setupRoutes();
   server.begin();
-  otaStarted = true;
+  otaStarted    = true;
   serverStarted = true;
 }
 
@@ -504,8 +515,8 @@ void loadPrefs() {
   calCjc1       = prefs.getFloat ("cjc1",    0.0);
   calCjc2       = prefs.getFloat ("cjc2",    0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
-  savedPSK      = prefs.getString("psk",   MYPSK);
-  cjcOffset     = prefs.getFloat("cjco", -12.0);
+  savedPSK      = prefs.getString("psk",  MYPSK);
+  cjcOffset     = prefs.getFloat ("cjco", -12.0);
   prefs.end();
 }
 
@@ -524,7 +535,7 @@ void savePrefs() {
   prefs.putFloat ("t2",    calTemp2);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
-  prefs.putFloat("cjco", cjcOffset);
+  prefs.putFloat ("cjco",  cjcOffset);
   prefs.end();
 }
 
@@ -546,32 +557,144 @@ void setupRoutes() {
     float cjc_C   = temperatureRead() + cjcOffset;
     float cjc_mV  = (cjc_C * uvPerC) / 1000.0f;
     float totalMV = lastShuntMV + cjc_mV;
-
-    String j = "{\"temp\":"        + String(currentTemp,    1)
-            + ",\"setpoint\":"    + String(setpoint,        1)
-            + ",\"output\":"      + String(outputOn ? 1 : 0)
-            + ",\"manual\":"      + String(manualOverride ? 1 : 0)
-            + ",\"hysteresis\":"  + String(hysteresis,      1)
-            + ",\"offset\":"      + String(probeOffset,     1)
-            + ",\"probeType\":"   + String(probeType)
-            + ",\"customUvPerC\":" + String(customUvPerC, 4)
-            + ",\"shuntMV\":"     + String(lastShuntMV,     4)
-            + ",\"totalMV\":"     + String(totalMV,         4)
-            + ",\"cjcC\":"        + String(cjc_C,           2)
-            + ",\"uvPerC\":"      + String(uvPerC,          4)
-            + ",\"cjcOffset\":"    + String(cjcOffset,        1)
-            + ",\"calMv1\":"      + String(calMv1,          4)
-            + ",\"calTemp1\":"    + String(calTemp1,        1)
-            + ",\"calCjc1\":"     + String(calCjc1,         2)
-            + ",\"calMv2\":"      + String(calMv2,          4)
-            + ",\"calTemp2\":"    + String(calTemp2,        1)
-            + ",\"calCjc2\":"     + String(calCjc2,         2)
-            + "}";
+    String j = "{\"temp\":"         + String(currentTemp,  1)
+             + ",\"setpoint\":"     + String(setpoint,      1)
+             + ",\"output\":"       + String(outputOn ? 1 : 0)
+             + ",\"manual\":"       + String(manualOverride ? 1 : 0)
+             + ",\"runActive\":"    + String(runActive ? 1 : 0)
+             + ",\"runMode\":"      + String((int)runMode)
+             + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
+             + ",\"hysteresis\":"   + String(hysteresis,    1)
+             + ",\"offset\":"       + String(probeOffset,   1)
+             + ",\"probeType\":"    + String(probeType)
+             + ",\"customUvPerC\":" + String(customUvPerC,  4)
+             + ",\"shuntMV\":"      + String(lastShuntMV,   4)
+             + ",\"totalMV\":"      + String(totalMV,       4)
+             + ",\"cjcC\":"         + String(cjc_C,         2)
+             + ",\"uvPerC\":"       + String(uvPerC,        4)
+             + ",\"cjcOffset\":"    + String(cjcOffset,     1)
+             + ",\"calMv1\":"       + String(calMv1,        4)
+             + ",\"calTemp1\":"     + String(calTemp1,      1)
+             + ",\"calCjc1\":"      + String(calCjc1,       2)
+             + ",\"calMv2\":"       + String(calMv2,        4)
+             + ",\"calTemp2\":"     + String(calTemp2,      1)
+             + ",\"calCjc2\":"      + String(calCjc2,       2)
+             + "}";
     server.send(200, "application/json", j);
   });
 
+  // ── Run control ──────────────────────────────────────────────────────────────
+  // POST /run  body: mode=bangbang|autoramp&action=start|stop
+  server.on("/run", HTTP_POST, []() {
+    String modeStr   = server.arg("mode");
+    String actionStr = server.arg("action");
+
+    if (actionStr == "start") {
+      runMode   = (modeStr == "autoramp") ? MODE_AUTO_RAMP : MODE_BANG_BANG;
+      runActive = true;
+      runStartMs = millis();
+      cacheHead  = 0;
+      cacheCount = 0;
+      manualOverride = false;
+      openRunLog();
+      DBGLN("Run started mode=" + modeStr);
+    } else if (actionStr == "stop") {
+      runActive      = false;
+      manualOverride = true;
+      outputOn       = false;
+      MOSFET_WRITE(false);
+      DBGLN("Run stopped");
+    } else {
+      server.send(400, "text/plain", "action must be start or stop"); return;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // ── Incremental log (since T seconds) ────────────────────────────────────────
+  // GET /log?since=N  -> CSV rows where t_s > N
+  // If no since param, returns all cached rows.
+  // Tries SPIFFS first; falls back to RAM cache.
+  server.on("/log", HTTP_GET, []() {
+    uint32_t since = 0;
+    if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
+
+    // Try SPIFFS
+    if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
+      File f = SPIFFS.open(LOG_PATH, FILE_READ);
+      if (f) {
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.send(200, "text/plain", "");
+        // Stream header always
+        server.sendContent("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n");
+        String line;
+        bool firstLine = true;
+        while (f.available()) {
+          line = f.readStringUntil('\n');
+          if (firstLine) { firstLine = false; continue; } // skip file header
+          if (!line.length()) continue;
+          // parse t_s (first field)
+          int comma = line.indexOf(',');
+          if (comma < 0) continue;
+          uint32_t ts = (uint32_t)line.substring(0, comma).toInt();
+          if (ts > since) server.sendContent(line + "\n");
+        }
+        f.close();
+        server.sendContent(""); // end chunked
+        return;
+      }
+    }
+    // RAM cache fallback
+    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
+    uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
+    for (uint16_t i = 0; i < count; i++) {
+      CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
+      if (s.t_s > since) {
+        out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
+             + "," + String(s.output) + "," + String(s.mode)
+             + "," + String(s.ramp_state) + "," + String(s.step_idx)
+             + "," + String(s.coast_ratio, 4) + "\n";
+      }
+    }
+    server.send(200, "text/plain", out);
+  });
+
+  // ── Full log download ─────────────────────────────────────────────────────────
+  // GET /log/full  -> entire runlog.csv as file download
+  server.on("/log/full", HTTP_GET, []() {
+    if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
+      File f = SPIFFS.open(LOG_PATH, FILE_READ);
+      if (f) {
+        server.sendHeader("Content-Disposition", "attachment; filename=\"runlog.csv\"");
+        server.setContentLength(f.size());
+        server.send(200, "text/csv", "");
+        uint8_t buf[256];
+        while (f.available()) {
+          size_t n = f.read(buf, sizeof(buf));
+          server.sendContent_P((const char*)buf, n);
+        }
+        f.close();
+        server.sendContent("");
+        return;
+      }
+    }
+    // Fallback: serve RAM cache as CSV
+    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
+    uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
+    for (uint16_t i = 0; i < count; i++) {
+      CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
+      out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
+           + "," + String(s.output) + "," + String(s.mode)
+           + "," + String(s.ramp_state) + "," + String(s.step_idx)
+           + "," + String(s.coast_ratio, 4) + "\n";
+    }
+    server.sendHeader("Content-Disposition", "attachment; filename=\"runlog_cache.csv\"");
+    server.send(200, "text/csv", out);
+  });
+
   server.on("/calibrate", HTTP_POST, []() {
-  if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
+    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
         !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
       server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
       return;
@@ -582,37 +705,22 @@ void setupRoutes() {
     float mv2   = server.arg("mv2").toFloat();
     float cjc2  = server.arg("cjc2").toFloat();
     float temp2 = server.arg("temp2").toFloat();
-    
-    if (temp2 <= temp1) {
-      server.send(400, "text/plain", "temp2 must be greater than temp1");
-      return;
-    }
-    
-    // Store raw calibration points
+    if (temp2 <= temp1) { server.send(400, "text/plain", "temp2 must be > temp1"); return; }
     calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
     calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
-    
-    // Direct solve — no uvEst needed
-    // At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
-    //           = mv1*1000/uvPerC + cjc1 + offset
-    // At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
-    // Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
-    // Solve for uvPerC:
-    float dMv   = mv2 - mv1;           // 3.885
-    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);  // (176-21.5) - (25-25) = 154.5
+    float dMv   = mv2 - mv1;
+    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);
     customUvPerC = (dMv * 1000.0f) / dTemp;
     probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
-
     savePrefs();
-    
-    String response = String("{\"uvPerC\":") + String(customUvPerC, 4)
-                    + ",\"offset\":" + String(probeOffset, 4) + "}";
-    server.send(200, "application/json", response);
+    server.send(200, "application/json",
+      String("{\"uvPerC\":") + String(customUvPerC, 4)
+      + ",\"offset\":" + String(probeOffset, 4) + "}");
   });
 
   server.on("/calibrate/clear", HTTP_POST, []() {
     customUvPerC = 0.0f;
-    probeOffset = 0.0f;
+    probeOffset  = 0.0f;
     savePrefs();
     server.send(200, "application/json", "{\"status\":\"cleared\"}");
   });
@@ -628,25 +736,12 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
-  // New: CSV log endpoint
-  server.on("/log", HTTP_GET, []() {
-    uint16_t count = (logCount < LOG_SIZE) ? logCount : LOG_SIZE;
-    uint16_t start = (logCount < LOG_SIZE) ? 0 : logHead;
-    String csv = "idx,tempC,shuntmV\n";
-    for (uint16_t i = 0; i < count; i++) {
-      SampleLog s = sampleLog[(start + i) % LOG_SIZE];
-      csv += String(i) + "," + String(s.tC, 4) + "," + String(s.shuntmV, 4) + "\n";
-    }
-    server.send(200, "text/plain", csv);
-  });
-
   server.on("/config", HTTP_POST, []() {
     if (server.hasArg("sp"))    setpoint    = server.arg("sp").toFloat();
     if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
     if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
     if (server.hasArg("ptype")) probeType   = server.arg("ptype").toInt();
-    // Optional: CJC offset
-    if (server.hasArg("cjco")) cjcOffset = server.arg("cjco").toFloat();
+    if (server.hasArg("cjco"))  cjcOffset   = server.arg("cjco").toFloat();
     savePrefs();
     server.send(200, "text/plain", "OK");
   });
@@ -664,7 +759,6 @@ void setupRoutes() {
     }
   });
 
-  // Web UI: output control route
   server.on("/output", HTTP_POST, []() {
     String mode = server.arg("mode");
     if (mode == "on") {
