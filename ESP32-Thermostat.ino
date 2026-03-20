@@ -148,9 +148,6 @@ void refitCoastModel();
 bool isStable();
 void resetStabilityBuf();
 
-// Prototypes for the ramp state machine
-void rampControlLoop();
-
 // ─── Ramp support functions ───────────────────────────────────────────
 float effectiveCoastRatio(float tempC) {
   float r = activeProfile.coastBase - activeProfile.coastSlope * (tempC / 100.0f);
@@ -278,10 +275,8 @@ bool serverStarted = false;
 bool isStable() {
   stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
   stabilityIdx++;
-  if (stabilityFilled < STABILITY_WINDOW) {
-    stabilityFilled++;
-    if (stabilityFilled < STABILITY_WINDOW) return false;
-  }
+  if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
+  if (stabilityFilled < STABILITY_WINDOW) return false;
   float mn = stabilityBuf[0], mx = stabilityBuf[0];
   for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
     if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
@@ -622,7 +617,8 @@ void rampControlLoop() {
         rampStateEnteredMs = millis();
         resetStabilityBuf();
         coastingDropCount = 0;
-        DBG("Ramp: HEATING hard cutoff at="); DBGLN(currentTemp);
+        DBG("Ramp: HEATING hard cutoff, fireStart="); DBG(rampFireStartTemp);
+        DBG(" cutoff="); DBGLN(rampCutoffTemp);
         break;
       }
 
@@ -644,7 +640,7 @@ void rampControlLoop() {
       break;
     }
 
-    case RS_COASTING:
+    case RS_COASTING: {
       if (currentTemp > rampPeakTemp) {
         rampPeakTemp      = currentTemp;
         coastingDropCount = 0;
@@ -684,6 +680,7 @@ void rampControlLoop() {
         rampStateEnteredMs = millis();
       }
       break;
+    }
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT:
@@ -706,6 +703,7 @@ void rampControlLoop() {
           rampFireStartTemp = currentTemp;
           rampStateEnteredMs = millis();
           resetStabilityBuf();
+          coastingDropCount = 0;
           outputOn = true;
           MOSFET_WRITE(true);
           DBG("Ramp: HEATING step "); DBGLN(rampStep);
