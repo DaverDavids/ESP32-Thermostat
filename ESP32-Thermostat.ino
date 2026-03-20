@@ -250,6 +250,8 @@ bool profileFromJson(const String& json, RampProfile& p) {
   return true;
 }
 
+extern bool spiffsOk;  // forward ref – defined in globals below
+
 void ensureProfileDir() {
   if (!spiffsOk) return;
   if (!SPIFFS.exists(PROFILE_DIR)) {
