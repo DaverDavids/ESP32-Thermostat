@@ -347,6 +347,10 @@ document.getElementById('profileForm').addEventListener('submit', async e => {
 
 async function startRun() {
   const mode = document.getElementById('runModeSelect').value;
+  const rows = await dbGetAll();
+  if (rows.length > 0) {
+    if (!confirm('Starting a new run will clear ' + rows.length + ' stored log rows from the previous run. Continue?')) return;
+  }
   await dbClear();
   await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode === 'autoramp' ? 'autoramp' : 'bangbang', action:'start'})});
   poll();

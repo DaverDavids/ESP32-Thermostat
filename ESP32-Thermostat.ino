@@ -588,6 +588,9 @@ void controlLoop() {
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
 // This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
+  bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
+  float stepTarget  = activeProfile.stepTargets[rampStep];
+
   switch (rampState) {
 
     case RS_IDLE:
@@ -603,41 +606,42 @@ void rampControlLoop() {
       return;
 
     case RS_HEATING: {
-      float stepTarget = activeProfile.stepTargets[rampStep];
+      float rise = currentTemp - rampFireStartTemp;
+      if (rise > 1.0f) {
+        float ratio = effectiveCoastRatio(stepTarget);
+        float predictedPeak = currentTemp + rise * ratio;
+        if (predictedPeak >= stepTarget) {
+          outputOn = false;
+          MOSFET_WRITE(false);
+          rampCutoffTemp = currentTemp;
+          rampPeakTemp   = currentTemp;
+          rampState      = RS_COASTING;
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          coastingDropCount = 0;
+          DBG("Ramp: COASTING, cutoff="); DBGLN(rampCutoffTemp);
+          break;
+        }
+      }
+
       if (currentTemp >= stepTarget) {
         outputOn = false;
         MOSFET_WRITE(false);
         rampCutoffTemp = currentTemp;
         rampPeakTemp   = currentTemp;
-        rampState      = RS_COASTING;
+        rampOvershootAmt = 0.0f;
+        rampState = isFinalStep ? RS_FINAL_SOAK : RS_SOAKING;
+        if (rampState == RS_FINAL_SOAK) finalSoakStartMs = millis();
         rampStateEnteredMs = millis();
         resetStabilityBuf();
         coastingDropCount = 0;
-        DBG("Ramp: HEATING hard cutoff, fireStart="); DBG(rampFireStartTemp);
-        DBG(" cutoff="); DBGLN(rampCutoffTemp);
+        DBG("Ramp: hard cutoff (already past target), skip coast for step "); DBGLN(rampStep);
         break;
-      }
-
-      float rise = currentTemp - rampFireStartTemp;
-      float ratio = effectiveCoastRatio(stepTarget);
-      float predictedPeak = currentTemp + rise * ratio;
-
-      if (predictedPeak >= stepTarget) {
-        outputOn = false;
-        MOSFET_WRITE(false);
-        rampCutoffTemp = currentTemp;
-        rampPeakTemp   = currentTemp;
-        rampState      = RS_COASTING;
-        rampStateEnteredMs = millis();
-        resetStabilityBuf();
-        coastingDropCount = 0;
-        DBG("Ramp: COASTING, cutoff="); DBGLN(rampCutoffTemp);
       }
       break;
     }
 
     case RS_COASTING: {
-      float stepTarget = activeProfile.stepTargets[rampStep];
       if (currentTemp > rampPeakTemp) {
         rampPeakTemp      = currentTemp;
         coastingDropCount = 0;
@@ -657,15 +661,17 @@ void rampControlLoop() {
         }
         coastingDropCount = 0;
         float rise = rampCutoffTemp - rampFireStartTemp;
-        float coast = (rise > 1.0f) ? (rampPeakTemp - rampCutoffTemp) / rise : 0.0f;
 
-        if (learnedCount < MAX_LEARNED_STEPS) {
+        if (rise > 1.0f && learnedCount < MAX_LEARNED_STEPS) {
+          float coast = (rampPeakTemp - rampCutoffTemp) / rise;
           learnedFireStartTemp[learnedCount] = rampFireStartTemp;
           learnedCutoffTemp[learnedCount]    = rampCutoffTemp;
           learnedPeakTemp[learnedCount]      = rampPeakTemp;
           learnedCoastRatio[learnedCount]    = coast;
           learnedCount++;
           refitCoastModel();
+        } else {
+          DBG("Ramp: skipping coast record, rise too small: "); DBGLN(rise);
         }
 
         rampOvershootAmt = max(0.0f, rampPeakTemp - stepTarget);
@@ -681,35 +687,54 @@ void rampControlLoop() {
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT: {
-      float stepTarget  = activeProfile.stepTargets[rampStep];
-      bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
       if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
       if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
 
-      if (isStable()) {
-        if (isFinalStep) {
-          rampState        = RS_FINAL_SOAK;
-          finalSoakStartMs = millis();
-          rampStateEnteredMs = millis();
-          resetStabilityBuf();
-          DBGLN("Ramp: FINAL_SOAK started");
-        } else {
-          rampStep++;
-          rampState         = RS_HEATING;
-          rampFireStartTemp = currentTemp;
-          rampStateEnteredMs = millis();
-          resetStabilityBuf();
-          coastingDropCount = 0;
-          outputOn = true;
-          MOSFET_WRITE(true);
-          DBG("Ramp: HEATING step "); DBGLN(rampStep);
+      if (rampState == RS_OVERSHOOT_WAIT) {
+        if (currentTemp <= stepTarget + 5.0f && isStable()) {
+          if (isFinalStep) {
+            rampState        = RS_FINAL_SOAK;
+            finalSoakStartMs = millis();
+            rampStateEnteredMs = millis();
+            resetStabilityBuf();
+            DBGLN("Ramp: FINAL_SOAK started");
+          } else {
+            rampStep++;
+            rampState         = RS_HEATING;
+            rampFireStartTemp = currentTemp;
+            rampStateEnteredMs = millis();
+            resetStabilityBuf();
+            coastingDropCount = 0;
+            outputOn = true;
+            MOSFET_WRITE(true);
+            DBG("Ramp: HEATING step "); DBGLN(rampStep);
+          }
+        }
+      } else {
+        if (isStable()) {
+          if (isFinalStep) {
+            rampState        = RS_FINAL_SOAK;
+            finalSoakStartMs = millis();
+            rampStateEnteredMs = millis();
+            resetStabilityBuf();
+            DBGLN("Ramp: FINAL_SOAK started");
+          } else {
+            rampStep++;
+            rampState         = RS_HEATING;
+            rampFireStartTemp = currentTemp;
+            rampStateEnteredMs = millis();
+            resetStabilityBuf();
+            coastingDropCount = 0;
+            outputOn = true;
+            MOSFET_WRITE(true);
+            DBG("Ramp: HEATING step "); DBGLN(rampStep);
+          }
         }
       }
       break;
     }
 
     case RS_FINAL_SOAK: {
-      float stepTarget = activeProfile.stepTargets[rampStep];
       if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
       if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
 
@@ -855,6 +880,8 @@ void setupRoutes() {
 
   // ── Ramp status (Stage 2) ───────────────────────────────────────────────
   server.on("/rampstatus", HTTP_GET, []() {
+    uint8_t safeStep = min(rampStep, (uint8_t)(activeProfile.stepCount - 1));
+
     // Build learned steps JSON array
     String learned = "[";
     for (uint8_t i = 0; i < learnedCount; i++) {
@@ -872,7 +899,7 @@ void setupRoutes() {
     // Current predicted peak (only meaningful in RS_HEATING)
     float rise = currentTemp - rampFireStartTemp;
     float predPeak = (rampState == RS_HEATING)
-      ? currentTemp + rise * effectiveCoastRatio(activeProfile.stepTargets[rampStep])
+      ? currentTemp + rise * effectiveCoastRatio(activeProfile.stepTargets[safeStep])
       : 0.0f;
 
     unsigned long stateAgeMs = millis() - rampStateEnteredMs;
@@ -886,7 +913,7 @@ void setupRoutes() {
     String j = "{\"rampState\":" + String((int)rampState)
              + ",\"rampStep\":" + String(rampStep)
              + ",\"stepCount\":" + String(activeProfile.stepCount)
-             + ",\"stepTarget\":" + String(activeProfile.stepTargets[rampStep], 1)
+             + ",\"stepTarget\":" + String(activeProfile.stepTargets[safeStep], 1)
              + ",\"finalTarget\":" + String(activeProfile.stepTargets[activeProfile.stepCount-1], 1)
              + ",\"predictedPeak\":" + String(predPeak, 1)
              + ",\"overshootAmt\":" + String(rampOvershootAmt, 1)
