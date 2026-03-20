@@ -106,8 +106,33 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 
 <div class="card">
-  <h2>&#x1F4CA; History</h2>
-  <canvas id="chart"></canvas>
+  <h2>&#x1F4CA; Run Chart</h2>
+  <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
+  <div id="chartLegend" style="font-size:.8rem;color:#aaa;margin-top:.3rem;display:flex;gap:1rem;flex-wrap:wrap;">
+    <span style="color:#0f9;">&#9644; Temperature</span>
+    <span style="color:#e94560;">&#9644; Setpoint</span>
+    <span style="color:#f39c12;">&#9644; Step Targets</span>
+  </div>
+  <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
+</div>
+
+<div class="card" id="runSummaryPanel" style="display:none;">
+  <h2>&#x1F3C1; Run Summary</h2>
+  <div id="runSummaryContent">
+    <table style="width:100%;font-size:.85rem;border-collapse:collapse;">
+      <thead><tr>
+        <th style="text-align:left;color:#aaa;">Step</th>
+        <th style="text-align:right;color:#aaa;">Target</th>
+        <th style="text-align:right;color:#aaa;">Peak</th>
+        <th style="text-align:right;color:#aaa;">Overshoot</th>
+        <th style="text-align:right;color:#aaa;">CoastR</th>
+        <th style="text-align:right;color:#aaa;">FireStart</th>
+        <th style="text-align:right;color:#aaa;">Cutoff</th>
+      </tr></thead>
+      <tbody id="summaryBody"></tbody>
+    </table>
+    <div id="summaryFooter" style="margin-top:.5rem;font-size:.85rem;color:#aaa;"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -270,6 +295,7 @@ async function syncLog() {
       await dbPutRows(rows);
       updateLogInfo();
     }
+    drawRunChart();
   } catch(e) { console.warn('syncLog error', e); }
 }
 
@@ -328,6 +354,8 @@ async function loadProfileFromDevice() {
     document.getElementById('profCoastBase').value  = p.coastBase;
     document.getElementById('profCoastSlope').value = p.coastSlope;
     document.getElementById('profileMsg').textContent = 'Loaded from device.';
+    runChartStepTargets = Array.isArray(p.stepTargets) ? p.stepTargets : [];
+    drawRunChart();
   } catch(e) {
     document.getElementById('profileMsg').textContent = 'Load failed: ' + e;
   }
@@ -351,7 +379,12 @@ async function startRun() {
   if (rows.length > 0) {
     if (!confirm('Starting a new run will clear ' + rows.length + ' stored log rows from the previous run. Continue?')) return;
   }
+  document.getElementById('runSummaryPanel').style.display = 'none';
+  document.getElementById('summaryBody').innerHTML = '';
+  runChartStepTargets = [];
+  runChartCurrentStep = 0;
   await dbClear();
+  drawRunChart();
   await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode === 'autoramp' ? 'autoramp' : 'bangbang', action:'start'})});
   poll();
 }
@@ -361,26 +394,126 @@ async function stopRun() {
   poll();
 }
 
-// ── Minimal canvas line chart ─────────────────────────────────────────────────
-function drawChart(data, sp) {
-  const c   = document.getElementById('chart');
-  const w   = c.width = c.offsetWidth;
-  const h   = c.height = 200;
-  const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, w, h);
-  if (!data.length) return;
-  const min = Math.min(...data) - 10;
-  const max = Math.max(...data, sp) + 10;
-  const sx  = w / (data.length - 1 || 1);
-  const sy  = h / (max - min);
-  const py  = v => h - (v - min) * sy;
-  ctx.strokeStyle = '#e94560'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
-  ctx.beginPath(); ctx.moveTo(0, py(sp)); ctx.lineTo(w, py(sp)); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.strokeStyle = '#0f9'; ctx.lineWidth = 2;
-  ctx.beginPath();
-  data.forEach((v, i) => i ? ctx.lineTo(i*sx, py(v)) : ctx.moveTo(0, py(v)));
-  ctx.stroke();
+// ── Run chart ─────────────────────────────────────────────────────────────────
+let runChartStepTargets = [];
+let runChartCurrentStep = 0;
+
+function drawRunChart() {
+  dbGetAll().then(rows => {
+    const c   = document.getElementById('runChart');
+    if (!c) return;
+    const w   = c.width  = c.offsetWidth;
+    const h   = c.height = 220;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+
+    const msg = document.getElementById('chartMsg');
+    if (!rows.length) {
+      msg.textContent = 'Waiting for run data...';
+      return;
+    }
+    msg.textContent = rows.length + ' samples \u2022 ' + (rows[rows.length-1].t_s) + 's elapsed';
+
+    const temps = rows.map(r => r.tempC);
+    const sps   = rows.map(r => r.setpoint);
+    const times = rows.map(r => r.t_s);
+
+    const allVals = [...temps, ...sps, ...runChartStepTargets];
+    let yMin = Math.min(...allVals) - 15;
+    let yMax = Math.max(...allVals) + 15;
+    if (yMax - yMin < 50) yMax = yMin + 50;
+
+    const tMin  = 0;
+    const tMax  = Math.max(...times, 60);
+
+    const px = t => Math.round((t - tMin) / (tMax - tMin) * (w - 1));
+    const py = v => Math.round(h - (v - yMin) / (yMax - yMin) * (h - 1));
+
+    ctx.setLineDash([4, 6]);
+    ctx.lineWidth = 1;
+    runChartStepTargets.forEach((tgt, i) => {
+      const isActive = (i === runChartCurrentStep);
+      ctx.strokeStyle = isActive ? '#f39c12' : 'rgba(243,156,18,0.35)';
+      ctx.beginPath();
+      ctx.moveTo(0, py(tgt));
+      ctx.lineTo(w, py(tgt));
+      ctx.stroke();
+      ctx.fillStyle = isActive ? '#f39c12' : 'rgba(243,156,18,0.5)';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(tgt.toFixed(0) + '\u00B0C', w - 38, py(tgt) - 3);
+    });
+    ctx.setLineDash([]);
+
+    if (sps.length > 1) {
+      ctx.strokeStyle = '#e94560';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      sps.forEach((sp, i) => {
+        const x = px(times[i]), y = py(sp);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.strokeStyle = '#0f9';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    temps.forEach((t, i) => {
+      const x = px(times[i]), y = py(t);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.fillStyle = '#666';
+    ctx.font = '10px sans-serif';
+    for (let i = 0; i <= 4; i++) {
+      const v = yMin + (yMax - yMin) * (i / 4);
+      const y = py(v);
+      ctx.fillText(v.toFixed(0), 2, y - 2);
+    }
+  });
+}
+
+async function showRunSummary(learnedSteps, stepTargets) {
+  const panel = document.getElementById('runSummaryPanel');
+  const tbody = document.getElementById('summaryBody');
+  const footer = document.getElementById('summaryFooter');
+  if (!panel || !tbody) return;
+
+  tbody.innerHTML = '';
+  if (!learnedSteps || !learnedSteps.length) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  learnedSteps.forEach((s, i) => {
+    const tgt      = (stepTargets && stepTargets[i] !== undefined) ? stepTargets[i] : s.target || '--';
+    const overshoot = (typeof s.peak === 'number' && typeof tgt === 'number')
+      ? (s.peak - tgt).toFixed(1)
+      : '--';
+    const ovColor  = parseFloat(overshoot) > 10 ? '#e74c3c' : (parseFloat(overshoot) > 3 ? '#f39c12' : '#0f9');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${i + 1}</td>`
+      + `<td style="text-align:right">${typeof tgt === 'number' ? tgt.toFixed(0) : tgt}&deg;C</td>`
+      + `<td style="text-align:right">${s.peak.toFixed(0)}&deg;C</td>`
+      + `<td style="text-align:right;color:${ovColor}">${overshoot > 0 ? '+' : ''}${overshoot}&deg;C</td>`
+      + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`
+      + `<td style="text-align:right">${s.fireStart.toFixed(0)}&deg;C</td>`
+      + `<td style="text-align:right">${s.cutoff.toFixed(0)}&deg;C</td>`;
+    tbody.appendChild(tr);
+  });
+
+  const rows = await dbGetAll();
+  if (rows.length) {
+    const totalS = rows[rows.length-1].t_s;
+    const m = Math.floor(totalS/60), s = totalS % 60;
+    footer.textContent = 'Total run time: ' + m + ':' + String(s).padStart(2,'0')
+      + ' \u2022 ' + rows.length + ' samples logged';
+  }
+
+  panel.style.display = 'block';
 }
 
 let currentSetpoint = 500;
@@ -427,6 +560,13 @@ async function poll() {
           ? '\u2705 Auto-Ramp run complete.'
           : '\u25A0 Run stopped.';
         rsEl.style.color = wasRamp ? '#0f9' : '#aaa';
+
+        if (wasRamp) {
+          fetch('/rampstatus').then(r => r.json()).then(rs => {
+            showRunSummary(rs.learned, runChartStepTargets);
+            drawRunChart();
+          }).catch(() => {});
+        }
       } else {
         rsEl.textContent = 'No run active.';
         rsEl.style.color = '#aaa';
@@ -462,8 +602,6 @@ async function poll() {
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
     }
-    drawChart(hist, currentSetpoint);
-
     // Sync log if run active
     if (st.runActive) syncLog();
     // Ramp status polling (Stage 2) - only in autoramp mode when run is active
@@ -476,6 +614,12 @@ async function poll() {
 async function pollRamp() {
   try {
     const rs = await fetch('/rampstatus').then(r => r.json());
+
+    if (rs.stepCount && rs.stepCount > 0) {
+      runChartCurrentStep = rs.rampStep;
+    }
+    drawRunChart();
+
     // Map state name
     const stateName = (rs.rampState >= 0 && rs.rampState < RAMP_STATE_NAMES.length)
       ? RAMP_STATE_NAMES[rs.rampState]
