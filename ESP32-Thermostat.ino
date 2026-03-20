@@ -229,9 +229,12 @@ bool profileFromJson(const String& json, RampProfile& p) {
   }
 
   {
-    int arr = json.indexOf("\"stepTargets\":[");
+    int arr = json.indexOf("\"stepTargets\":");
     if (arr < 0) return false;
-    arr += 15;
+    arr += 14;
+    while (arr < (int)json.length() && (json[arr] == ' ' || json[arr] == '\t')) arr++;
+    if (arr >= (int)json.length() || json[arr] != '[') return false;
+    arr++;
     uint8_t n = 0;
     while (n < p.stepCount && arr < (int)json.length() && json[arr] != ']') {
       while (arr < (int)json.length() && (json[arr] == ' ' || json[arr] == ',')) arr++;
@@ -261,8 +264,9 @@ void ensureProfileDir() {
 // ramp_state and step_idx are placeholders (0) until Stage 2.
 static const char* LOG_PATH = "/runlog.csv";
 bool     spiffsOk   = false;
-bool     runActive  = false;   // true when a timed run is in progress
+bool     runActive  = false;
 unsigned long runStartMs = 0;
+File     runLogFile;
 
 // Short RAM cache: 64 most-recent samples for fast /log?since= serving
 #define CACHE_SIZE 64
@@ -282,11 +286,14 @@ uint16_t cacheCount = 0;
 
 void openRunLog() {
   if (!spiffsOk) return;
-  File f = SPIFFS.open(LOG_PATH, FILE_WRITE);
-  if (!f) { DBGLN("SPIFFS open failed"); return; }
-  f.println("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est");
-  f.close();
+  runLogFile = SPIFFS.open(LOG_PATH, FILE_WRITE);
+  if (!runLogFile) { DBGLN("SPIFFS open failed"); return; }
+  runLogFile.println("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est");
   DBGLN("Run log opened");
+}
+
+void closeRunLog() {
+  if (runLogFile) { runLogFile.close(); }
 }
 
 void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
@@ -296,22 +303,21 @@ void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
   cacheHead++;
   if (cacheCount < CACHE_SIZE) cacheCount++;
 
-  if (!spiffsOk) return;
-  File f = SPIFFS.open(LOG_PATH, FILE_APPEND);
-  if (!f) return;
-  f.print(t_s);          f.print(',');
-  f.print(tC, 2);        f.print(',');
-  f.print(sp, 1);        f.print(',');
-  f.print(output);       f.print(',');
-  f.print(mode);         f.print(',');
-  f.print(ramp_state);   f.print(',');
-  f.print(step_idx);     f.print(',');
-  f.println(coast_ratio, 4);
-  f.close();
+  if (!spiffsOk || !runLogFile) return;
+  runLogFile.print(t_s);          runLogFile.print(',');
+  runLogFile.print(tC, 2);       runLogFile.print(',');
+  runLogFile.print(sp, 1);       runLogFile.print(',');
+  runLogFile.print(output);       runLogFile.print(',');
+  runLogFile.print(mode);         runLogFile.print(',');
+  runLogFile.print(ramp_state);   runLogFile.print(',');
+  runLogFile.print(step_idx);     runLogFile.print(',');
+  runLogFile.println(coast_ratio, 4);
+  runLogFile.flush();
 }
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
+bool             prefsDirty = false;
 WebServer        server(80);
 DNSServer        dns;
 Adafruit_INA219  ina219;
@@ -520,14 +526,14 @@ void loop() {
     btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
     btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
     btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
-    savePrefs();
+    prefsDirty = true;
   }
   if (btns[1].phase == BTN_HELD && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
     btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
     btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
     btns[1].nextFire        = now + (unsigned long)btns[1].currentInterval;
-    savePrefs();
+    prefsDirty = true;
   }
 
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
@@ -602,8 +608,8 @@ void updateButtons() {
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
           btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
-          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
-          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
+          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); prefsDirty = true; }
+          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); prefsDirty = true; }
         }
         break;
       case BTN_HELD:
@@ -611,6 +617,7 @@ void updateButtons() {
           btns[i].phase           = BTN_IDLE;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
+          if (prefsDirty) { savePrefs(); prefsDirty = false; }
         } else if (i == 2 && now >= btns[i].nextFire) {
           btns[i].nextFire = ULONG_MAX;
           if (!manualOverride) {
@@ -674,6 +681,10 @@ void controlLoop() {
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
 // This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
+  if (rampStep >= activeProfile.stepCount) {
+    rampStep = activeProfile.stepCount > 0 ? activeProfile.stepCount - 1 : 0;
+  }
+
   bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
   float stepTarget  = activeProfile.stepTargets[rampStep];
 
@@ -833,6 +844,7 @@ void rampControlLoop() {
         runActive  = false;
         manualOverride = true;
         rampStateEnteredMs = millis();
+        closeRunLog();
         DBGLN("Ramp: DONE");
         DBGLN("Profile saved after completed run");
       }
@@ -963,7 +975,8 @@ bool requireAuth() {
 // ─── Web routes ───────────────────────────────────────────────────────────────
 void setupRoutes() {
   server.onNotFound([]() {
-    server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/");
+    String host = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+    server.sendHeader("Location", "http://" + host + "/");
     server.send(302);
   });
 
@@ -1225,6 +1238,7 @@ void setupRoutes() {
       manualOverride = true;
       outputOn       = false;
       MOSFET_WRITE(false);
+      closeRunLog();
       DBGLN("Run stopped");
     } else {
       server.send(400, "text/plain", "action must be start or stop"); return;
