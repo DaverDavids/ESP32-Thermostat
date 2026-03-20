@@ -50,7 +50,7 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (~37Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
-const float    OUTLIER_MAX_JUMP = 150.0f;
+const float    OUTLIER_MAX_JUMP = 300.0f;
 const float    SHUNT_MIN_MV     =  -5.0f;
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
@@ -67,7 +67,7 @@ const uint32_t CTR_LONGPRESS_MS = 2000;
 const uint32_t RAMP_DELAY_MS        =  200;
 const uint32_t RAMP_RATE_INITIAL_MS =  100;
 const uint32_t RAMP_RATE_MIN_MS     =    1;
-const float    RAMP_ACCEL           = 0.75f;
+const float    RAMP_ACCEL           = 0.9f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
@@ -215,7 +215,7 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
 
   if (!ina219.begin()) { DBGLN("INA219 not found"); }
-  else { ina219.setCalibration_16V_400mA(); DBGLN("INA219 ready"); }
+  else { ina219.setCalibration_32V_2A(); DBGLN("INA219 ready"); }
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     DBGLN("SSD1306 not found");

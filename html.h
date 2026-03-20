@@ -346,8 +346,7 @@ async function poll() {
       const pEl = document.getElementById('cfgPtype');
       if (pEl) { const pVal = (st.customUvPerC > 0) ? 2 : st.probeType; pEl.value = pVal; updateCalMode(pVal); }
     }
-    if (!document.getElementById('cfgCjco').value && document.getElementById('cfgCjco').value !== '0')
-      document.getElementById('cfgCjco').value = st.cjcOffset;
+    // CJC offset is filled in the unified cfgSp block above
 
     const crEl = document.getElementById('calResult');
     if (st.customUvPerC > 0)
@@ -357,10 +356,10 @@ async function poll() {
 
     if (document.getElementById('calMv1').value === '') {
       document.getElementById('calMv1').value   = st.calMv1;
-      document.getElementById('calCjc1').value  = st.calCjc1;
+      document.getElementById('calCjc1').value  = st.cjcC.toFixed(1);
       document.getElementById('calTemp1').value = st.calTemp1;
       document.getElementById('calMv2').value   = st.calMv2;
-      document.getElementById('calCjc2').value  = st.calCjc2;
+      document.getElementById('calCjc2').value  = st.cjcC.toFixed(1);
       document.getElementById('calTemp2').value = st.calTemp2;
     }
     drawChart(hist, currentSetpoint);
