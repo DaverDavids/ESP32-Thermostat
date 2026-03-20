@@ -172,6 +172,88 @@ void refitCoastModel() {
   activeProfile.coastBase  = intercept;
 }
 
+static const char* PROFILE_DIR = "/profiles";
+
+String profileToJson(const RampProfile& p) {
+  String steps = "[";
+  for (uint8_t i = 0; i < p.stepCount; i++) {
+    if (i) steps += ",";
+    steps += String(p.stepTargets[i], 1);
+  }
+  steps += "]";
+  return String("{\"name\":\"")        + p.name
+       + "\",\"stepTargets\":"         + steps
+       + ",\"stepCount\":"             + String(p.stepCount)
+       + ",\"soakMinutes\":"           + String(p.soakMinutes, 2)
+       + ",\"stabilityThreshC\":"      + String(p.stabilityThreshC, 2)
+       + ",\"coastBase\":"             + String(p.coastBase, 6)
+       + ",\"coastSlope\":"            + String(p.coastSlope, 6)
+       + ",\"complete\":"               + String(p.complete ? "true" : "false")
+       + "}";
+}
+
+bool profileFromJson(const String& json, RampProfile& p) {
+  auto strVal = [&](const char* key) -> String {
+    String k = String("\"") + key + "\":\"";
+    int idx = json.indexOf(k);
+    if (idx < 0) return "";
+    idx += k.length();
+    int end = json.indexOf("\"", idx);
+    return (end > idx) ? json.substring(idx, end) : "";
+  };
+  auto numVal = [&](const char* key) -> float {
+    String k = String("\"") + key + "\":";
+    int idx = json.indexOf(k);
+    if (idx < 0) return 0.0f;
+    idx += k.length();
+    while (idx < (int)json.length() && json[idx] == ' ') idx++;
+    int end = idx;
+    while (end < (int)json.length() && (isDigit(json[end]) || json[end]=='.' || json[end]=='-')) end++;
+    return json.substring(idx, end).toFloat();
+  };
+
+  String name = strVal("name");
+  if (!name.length()) return false;
+  strncpy(p.name, name.c_str(), 31);
+  p.soakMinutes      = numVal("soakMinutes");
+  p.stabilityThreshC = numVal("stabilityThreshC");
+  p.coastBase        = numVal("coastBase");
+  p.coastSlope       = numVal("coastSlope");
+  p.stepCount        = (uint8_t)numVal("stepCount");
+  p.stepCount        = constrain(p.stepCount, 1, RAMP_MAX_STEPS);
+
+  {
+    String k = "\"complete\":";
+    int idx = json.indexOf(k);
+    p.complete = (idx >= 0 && json.indexOf("true", idx + k.length()) == idx + k.length());
+  }
+
+  {
+    int arr = json.indexOf("\"stepTargets\":[");
+    if (arr < 0) return false;
+    arr += 15;
+    uint8_t n = 0;
+    while (n < p.stepCount && arr < (int)json.length() && json[arr] != ']') {
+      while (arr < (int)json.length() && (json[arr] == ' ' || json[arr] == ',')) arr++;
+      if (json[arr] == ']') break;
+      int end = arr;
+      while (end < (int)json.length() && (isDigit(json[end]) || json[end]=='.' || json[end]=='-')) end++;
+      p.stepTargets[n++] = json.substring(arr, end).toFloat();
+      arr = end;
+    }
+    if (n != p.stepCount) return false;
+  }
+  return true;
+}
+
+void ensureProfileDir() {
+  if (!spiffsOk) return;
+  if (!SPIFFS.exists(PROFILE_DIR)) {
+    File f = SPIFFS.open(String(PROFILE_DIR) + "/.keep", FILE_WRITE);
+    if (f) f.close();
+  }
+}
+
 // ─── SPIFFS run log ───────────────────────────────────────────────────────────
 // Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
 // OR bang-bang auto active). Columns:
@@ -345,7 +427,7 @@ void setup() {
 
   // SPIFFS
   spiffsOk = SPIFFS.begin(true);
-  if (spiffsOk) { DBGLN("SPIFFS ready"); }
+  if (spiffsOk) { DBGLN("SPIFFS ready"); ensureProfileDir(); }
   else          { DBGLN("SPIFFS failed - logging to RAM cache only"); }
 
   loadPrefs();
@@ -741,11 +823,14 @@ void rampControlLoop() {
       if ((millis() - finalSoakStartMs) >= (unsigned long)(activeProfile.soakMinutes * 60000.0f)) {
         outputOn = false;
         MOSFET_WRITE(false);
+        activeProfile.complete = true;
+        savePrefs();
         rampState  = RS_DONE;
         runActive  = false;
         manualOverride = true;
         rampStateEnteredMs = millis();
         DBGLN("Ramp: DONE");
+        DBGLN("Profile saved after completed run");
       }
       break;
     }
@@ -812,6 +897,22 @@ void loadPrefs() {
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",  MYPSK);
   cjcOffset     = prefs.getFloat ("cjco", -12.0);
+  // Active ramp profile (Stage 4)
+  strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
+  activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
+  activeProfile.stabilityThreshC = prefs.getFloat("rp_stab",       2.0f);
+  activeProfile.coastBase        = prefs.getFloat("rp_cbase",     0.40f);
+  activeProfile.coastSlope       = prefs.getFloat("rp_cslope",    0.03f);
+  activeProfile.complete         = prefs.getBool ("rp_complete",  false);
+  activeProfile.stepCount        = (uint8_t)prefs.getUInt("rp_stepct", 7);
+  activeProfile.stepCount        = min(activeProfile.stepCount, (uint8_t)RAMP_MAX_STEPS);
+  {
+    size_t len = prefs.getBytesLength("rp_steps");
+    if (len == activeProfile.stepCount * sizeof(float)) {
+      prefs.getBytes("rp_steps", activeProfile.stepTargets,
+                     activeProfile.stepCount * sizeof(float));
+    }
+  }
   prefs.end();
 }
 
@@ -831,6 +932,16 @@ void savePrefs() {
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
   prefs.putFloat ("cjco",  cjcOffset);
+  // Active ramp profile (Stage 4)
+  prefs.putString("rp_name",     activeProfile.name);
+  prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
+  prefs.putFloat ("rp_stab",     activeProfile.stabilityThreshC);
+  prefs.putFloat ("rp_cbase",    activeProfile.coastBase);
+  prefs.putFloat ("rp_cslope",   activeProfile.coastSlope);
+  prefs.putBool  ("rp_complete", activeProfile.complete);
+  prefs.putUInt  ("rp_stepct",   activeProfile.stepCount);
+  prefs.putBytes ("rp_steps",    activeProfile.stepTargets,
+                  activeProfile.stepCount * sizeof(float));
   prefs.end();
 }
 
@@ -967,7 +1078,96 @@ void setupRoutes() {
         activeProfile.stepTargets[n++] = s.substring(start).toFloat();
       activeProfile.stepCount = n;
     }
+    savePrefs();
     server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/profiles", HTTP_GET, []() {
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    String json = "[";
+    bool first  = true;
+    File root   = SPIFFS.open(PROFILE_DIR);
+    if (root && root.isDirectory()) {
+      File f = root.openNextFile();
+      while (f) {
+        String fname = String(f.name());
+        if (fname.endsWith(".json")) {
+          int slash = fname.lastIndexOf('/');
+          String pname = fname.substring(slash + 1, fname.length() - 5);
+          if (!first) json += ",";
+          json += "\"" + pname + "\"";
+          first = false;
+        }
+        f.close();
+        f = root.openNextFile();
+      }
+      root.close();
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/profiles/save", HTTP_POST, []() {
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (server.hasArg("name") && server.arg("name").length() > 0) {
+      String n = server.arg("name");
+      n.trim();
+      for (int i = 0; i < (int)n.length(); i++) {
+        char c = n[i];
+        if (!isAlphaNumeric(c) && c != '-' && c != '_') { n.setCharAt(i, '_'); }
+      }
+      strncpy(activeProfile.name, n.c_str(), 31);
+    }
+    String path = String(PROFILE_DIR) + "/" + activeProfile.name + ".json";
+    File f = SPIFFS.open(path, FILE_WRITE);
+    if (!f) { server.send(500, "text/plain", "Failed to open file"); return; }
+    f.print(profileToJson(activeProfile));
+    f.close();
+    savePrefs();
+    DBG("Profile saved to SPIFFS: "); DBGLN(path);
+    server.send(200, "application/json",
+      "{\"saved\":\"" + String(activeProfile.name) + "\"}");
+  });
+
+  server.on("/profiles/load", HTTP_POST, []() {
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (!server.hasArg("name") || !server.arg("name").length()) {
+      server.send(400, "text/plain", "Missing name"); return;
+    }
+    String n = server.arg("name");
+    n.trim();
+    String path = String(PROFILE_DIR) + "/" + n + ".json";
+    if (!SPIFFS.exists(path)) {
+      server.send(404, "text/plain", "Profile not found"); return;
+    }
+    File f = SPIFFS.open(path, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "Failed to open file"); return; }
+    String json = f.readString();
+    f.close();
+    RampProfile tmp;
+    if (!profileFromJson(json, tmp)) {
+      server.send(500, "text/plain", "Parse error"); return;
+    }
+    activeProfile = tmp;
+    savePrefs();
+    DBG("Profile loaded from SPIFFS: "); DBGLN(path);
+    server.send(200, "application/json", profileToJson(activeProfile));
+  });
+
+  server.on("/profiles/delete", HTTP_POST, []() {
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (!server.hasArg("name") || !server.arg("name").length()) {
+      server.send(400, "text/plain", "Missing name"); return;
+    }
+    String n    = server.arg("name");
+    n.trim();
+    String path = String(PROFILE_DIR) + "/" + n + ".json";
+    if (!SPIFFS.exists(path)) {
+      server.send(404, "text/plain", "Not found"); return;
+    }
+    SPIFFS.remove(path);
+    DBG("Profile deleted: "); DBGLN(path);
+    server.send(200, "application/json", "{\"deleted\":\"" + n + "\"}");
   });
 
   // ── Run control ──────────────────────────────────────────────────────────────

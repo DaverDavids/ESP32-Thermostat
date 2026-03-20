@@ -105,6 +105,26 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <div id="profileMsg" style="margin-top:.4rem;font-size:.85rem;color:#0f9;"></div>
   </div>
 
+  <div class="card" id="profileLibPanel" style="display:none;">
+    <h2>&#x1F4DA; Profile Library</h2>
+    <div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.6rem;">
+      <div style="flex:1;min-width:160px;">
+        <label style="margin-bottom:.3rem;">Saved Profiles
+          <select id="profileLibSelect" style="width:100%;">
+            <option value="">-- select --</option>
+          </select>
+        </label>
+      </div>
+      <button onclick="loadSelectedProfile()" style="background:#2980b9;">&#x21A9; Load</button>
+      <button onclick="deleteSelectedProfile()" style="background:#a33;">&#x1F5D1; Delete</button>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+      <input type="text" id="saveProfileName" placeholder="Save current as..." style="flex:1;min-width:140px;">
+      <button onclick="saveCurrentProfile()" style="background:#2ecc71;color:#111;">&#x1F4BE; Save</button>
+    </div>
+    <div id="profileLibMsg" style="margin-top:.4rem;font-size:.85rem;color:#0f9;"></div>
+  </div>
+
 <div class="card">
   <h2>&#x1F4CA; Run Chart</h2>
   <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
@@ -340,8 +360,10 @@ async function exportCSV() {
 // ── Run control ───────────────────────────────────────────────────────────────
 document.getElementById('runModeSelect').addEventListener('change', function() {
   const isRamp = this.value === 'autoramp';
-  document.getElementById('rampPanel').style.display    = isRamp ? 'block' : 'none';
-  document.getElementById('profilePanel').style.display = isRamp ? 'block' : 'none';
+  document.getElementById('rampPanel').style.display       = isRamp ? 'block' : 'none';
+  document.getElementById('profilePanel').style.display    = isRamp ? 'block' : 'none';
+  document.getElementById('profileLibPanel').style.display = isRamp ? 'block' : 'none';
+  if (isRamp) refreshProfileList();
 });
 
 async function loadProfileFromDevice() {
@@ -372,6 +394,81 @@ document.getElementById('profileForm').addEventListener('submit', async e => {
     document.getElementById('profileMsg').textContent = 'Apply failed: ' + e;
   }
 });
+
+// ── Profile library ───────────────────────────────────────────────────────────
+async function refreshProfileList() {
+  try {
+    const names = await fetch('/profiles').then(r => r.json());
+    const sel   = document.getElementById('profileLibSelect');
+    const cur   = sel.value;
+    sel.innerHTML = '<option value="">-- select --</option>';
+    names.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n; opt.textContent = n;
+      if (n === cur) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    const nameInput = document.getElementById('saveProfileName');
+    if (!nameInput.value) {
+      const p = await fetch('/profile').then(r => r.json());
+      nameInput.value = p.name;
+    }
+  } catch(e) {
+    document.getElementById('profileLibMsg').textContent = 'List failed: ' + e;
+  }
+}
+
+async function loadSelectedProfile() {
+  const name = document.getElementById('profileLibSelect').value;
+  if (!name) { alert('Select a profile first.'); return; }
+  try {
+    const r = await fetch('/profiles/load', {
+      method: 'POST',
+      body: new URLSearchParams({name})
+    });
+    if (!r.ok) throw new Error(await r.text());
+    await loadProfileFromDevice();
+    document.getElementById('profileLibMsg').textContent = 'Loaded: ' + name;
+  } catch(e) {
+    document.getElementById('profileLibMsg').textContent = 'Load failed: ' + e;
+  }
+}
+
+async function saveCurrentProfile() {
+  const nameInput = document.getElementById('saveProfileName');
+  const name = nameInput.value.trim();
+  if (!name) { alert('Enter a profile name to save.'); return; }
+  try {
+    const r = await fetch('/profiles/save', {
+      method: 'POST',
+      body: new URLSearchParams({name})
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const result = await r.json();
+    document.getElementById('profileLibMsg').textContent = 'Saved: ' + result.saved;
+    await refreshProfileList();
+    document.getElementById('profName').value = result.saved;
+  } catch(e) {
+    document.getElementById('profileLibMsg').textContent = 'Save failed: ' + e;
+  }
+}
+
+async function deleteSelectedProfile() {
+  const name = document.getElementById('profileLibSelect').value;
+  if (!name) { alert('Select a profile to delete.'); return; }
+  if (!confirm('Delete profile "' + name + '"?')) return;
+  try {
+    const r = await fetch('/profiles/delete', {
+      method: 'POST',
+      body: new URLSearchParams({name})
+    });
+    if (!r.ok) throw new Error(await r.text());
+    document.getElementById('profileLibMsg').textContent = 'Deleted: ' + name;
+    await refreshProfileList();
+  } catch(e) {
+    document.getElementById('profileLibMsg').textContent = 'Delete failed: ' + e;
+  }
+}
 
 async function startRun() {
   const mode = document.getElementById('runModeSelect').value;
@@ -550,8 +647,9 @@ async function poll() {
       rsEl.style.color = '#2ecc71';
 
       const isRamp = st.runMode === 1;
-      document.getElementById('rampPanel').style.display    = isRamp ? 'block' : 'none';
-      document.getElementById('profilePanel').style.display = isRamp ? 'block' : 'none';
+      document.getElementById('rampPanel').style.display       = isRamp ? 'block' : 'none';
+      document.getElementById('profilePanel').style.display    = isRamp ? 'block' : 'none';
+      document.getElementById('profileLibPanel').style.display = isRamp ? 'block' : 'none';
       document.getElementById('runModeSelect').value = isRamp ? 'autoramp' : 'bangbang';
     } else {
       if (wasRunActive && !st.runActive) {
@@ -687,7 +785,12 @@ async function pollRamp() {
 }
 
 setInterval(poll, 1000);
-openDB().then(() => { updateLogInfo(); loadProfileFromDevice(); poll(); });
+openDB().then(() => {
+  updateLogInfo();
+  loadProfileFromDevice();
+  refreshProfileList();
+  poll();
+});
 
 // ── Config form ───────────────────────────────────────────────────────────────
 document.getElementById('cfgForm').addEventListener('submit', async e => {
