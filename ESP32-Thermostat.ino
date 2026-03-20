@@ -588,26 +588,22 @@ void controlLoop() {
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
 // This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
-  if (rampState == RS_IDLE) {
-    rampStep           = 0;
-    rampState          = RS_HEATING;
-    rampStateEnteredMs = millis();
-    rampFireStartTemp  = currentTemp;
-    resetStabilityBuf();
-    outputOn = true;
-    MOSFET_WRITE(true);
-    DBGLN("Ramp: HEATING step 0");
-    return;
-  }
-
-  float stepTarget = activeProfile.stepTargets[rampStep];
-  bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
-
   switch (rampState) {
 
-    case RS_IDLE: break;
+    case RS_IDLE:
+      rampStep           = 0;
+      rampState          = RS_HEATING;
+      rampStateEnteredMs = millis();
+      rampFireStartTemp  = currentTemp;
+      resetStabilityBuf();
+      coastingDropCount  = 0;
+      outputOn = true;
+      MOSFET_WRITE(true);
+      DBGLN("Ramp: HEATING step 0");
+      return;
 
     case RS_HEATING: {
+      float stepTarget = activeProfile.stepTargets[rampStep];
       if (currentTemp >= stepTarget) {
         outputOn = false;
         MOSFET_WRITE(false);
@@ -641,6 +637,7 @@ void rampControlLoop() {
     }
 
     case RS_COASTING: {
+      float stepTarget = activeProfile.stepTargets[rampStep];
       if (currentTemp > rampPeakTemp) {
         rampPeakTemp      = currentTemp;
         coastingDropCount = 0;
@@ -683,21 +680,20 @@ void rampControlLoop() {
     }
 
     case RS_SOAKING:
-    case RS_OVERSHOOT_WAIT:
-      // Maintain bang-bang around step target while soaking
+    case RS_OVERSHOOT_WAIT: {
+      float stepTarget  = activeProfile.stepTargets[rampStep];
+      bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
       if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
       if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
 
       if (isStable()) {
         if (isFinalStep) {
-          // Transition to final soak
           rampState        = RS_FINAL_SOAK;
           finalSoakStartMs = millis();
           rampStateEnteredMs = millis();
           resetStabilityBuf();
           DBGLN("Ramp: FINAL_SOAK started");
         } else {
-          // Advance to next step
           rampStep++;
           rampState         = RS_HEATING;
           rampFireStartTemp = currentTemp;
@@ -710,9 +706,10 @@ void rampControlLoop() {
         }
       }
       break;
+    }
 
-    case RS_FINAL_SOAK:
-      // Maintain bang-bang around final target
+    case RS_FINAL_SOAK: {
+      float stepTarget = activeProfile.stepTargets[rampStep];
       if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
       if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
 
@@ -726,6 +723,7 @@ void rampControlLoop() {
         DBGLN("Ramp: DONE");
       }
       break;
+    }
 
     case RS_DONE:
       outputOn = false;
@@ -967,6 +965,7 @@ void setupRoutes() {
         learnedCount      = 0;
         finalSoakStartMs  = 0;
         resetStabilityBuf();
+        coastingDropCount = 0;
         // Clear learned arrays
         memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
         memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
