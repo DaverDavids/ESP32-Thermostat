@@ -138,8 +138,9 @@ unsigned long finalSoakStartMs   = 0;
 // Stability detection: sliding window over last 30s = 60 samples at 2Hz
 #define STABILITY_WINDOW 60
 float stabilityBuf[STABILITY_WINDOW];
-uint8_t stabilityIdx   = 0;
-uint8_t stabilityFilled = 0;  // 0 until buffer has at least STABILITY_WINDOW entries
+uint16_t stabilityIdx   = 0;
+uint16_t stabilityFilled = 0;  // 0 until buffer has at least STABILITY_WINDOW entries
+uint8_t coastingDropCount = 0;  // consecutive samples below peak threshold
 
 // Helpers (forward declarations)
 float effectiveCoastRatio(float tempC);
@@ -590,21 +591,24 @@ void controlLoop() {
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
 // This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
+  if (rampState == RS_IDLE) {
+    rampStep           = 0;
+    rampState          = RS_HEATING;
+    rampStateEnteredMs = millis();
+    rampFireStartTemp  = currentTemp;
+    resetStabilityBuf();
+    outputOn = true;
+    MOSFET_WRITE(true);
+    DBGLN("Ramp: HEATING step 0");
+    return;
+  }
+
   float stepTarget = activeProfile.stepTargets[rampStep];
   bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
 
   switch (rampState) {
 
-    case RS_IDLE:
-      rampStep           = 0;
-      rampState          = RS_HEATING;
-      rampStateEnteredMs = millis();
-      rampFireStartTemp  = currentTemp;
-      resetStabilityBuf();
-      outputOn = true;
-      MOSFET_WRITE(true);
-      DBGLN("Ramp: HEATING step 0");
-      break;
+    case RS_IDLE: break;
 
     case RS_HEATING: {
       // Predict where we'll peak if we cut off now
@@ -621,19 +625,26 @@ void rampControlLoop() {
         rampState      = RS_COASTING;
         rampStateEnteredMs = millis();
         resetStabilityBuf();
+        coastingDropCount = 0;
         DBG("Ramp: COASTING, cutoff="); DBGLN(rampCutoffTemp);
       }
       break;
     }
 
     case RS_COASTING:
-      // Track peak
-      if (currentTemp > rampPeakTemp) rampPeakTemp = currentTemp;
+      if (currentTemp > rampPeakTemp) {
+        rampPeakTemp      = currentTemp;
+        coastingDropCount = 0;
+      }
 
-      // Detect inflection: temp has peaked (falling for at least 3 consecutive samples)
-      // Use simple check: current temp < peak by more than noise (2°C)
       if (rampPeakTemp - currentTemp > 2.0f) {
-        // Compute learned coast ratio for this step
+        coastingDropCount++;
+      } else {
+        coastingDropCount = 0;
+      }
+
+      if (coastingDropCount >= 3) {
+        coastingDropCount = 0;
         float rise = rampCutoffTemp - rampFireStartTemp;
         float coast = (rise > 1.0f) ? (rampPeakTemp - rampCutoffTemp) / rise : 0.0f;
 
@@ -872,7 +883,7 @@ void setupRoutes() {
              + ",\"learnedCount\":" + String(learnedCount)
              + ",\"learned\":" + learned
              + "}";
-  server.send(200, "application/json", j);
+    server.send(200, "application/json", j);
   });
 
   // /profile: read current active ramp profile
@@ -972,8 +983,9 @@ void setupRoutes() {
       File f = SPIFFS.open(LOG_PATH, FILE_READ);
       if (f) {
         server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.sendHeader("Content-Type", "text/plain");
+        server.sendHeader("Connection", "close");
         server.send(200, "text/plain", "");
-        // Stream header always
         server.sendContent("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n");
         String line;
         bool firstLine = true;
