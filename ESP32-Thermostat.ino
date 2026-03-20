@@ -339,6 +339,10 @@ float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
+// ─── Web auth ─────────────────────────────────────────────────────────────────
+String webUser = "admin";
+String webPass = "thermostat";
+
 const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
 
 #define HIST_SIZE 720
@@ -897,6 +901,8 @@ void loadPrefs() {
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",  MYPSK);
   cjcOffset     = prefs.getFloat ("cjco", -12.0);
+  webUser = prefs.getString("wuser", "admin");
+  webPass = prefs.getString("wpass", "thermostat");
   // Active ramp profile (Stage 4)
   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
@@ -932,6 +938,8 @@ void savePrefs() {
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
   prefs.putFloat ("cjco",  cjcOffset);
+  prefs.putString("wuser", webUser);
+  prefs.putString("wpass", webPass);
   // Active ramp profile (Stage 4)
   prefs.putString("rp_name",     activeProfile.name);
   prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
@@ -943,6 +951,13 @@ void savePrefs() {
   prefs.putBytes ("rp_steps",    activeProfile.stepTargets,
                   activeProfile.stepCount * sizeof(float));
   prefs.end();
+}
+
+bool requireAuth() {
+  if (server.authenticate(webUser.c_str(), webPass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "Thermostat",
+    "Authentication required");
+  return false;
 }
 
 // ─── Web routes ───────────────────────────────────────────────────────────────
@@ -1059,6 +1074,7 @@ void setupRoutes() {
   });
 
   server.on("/profile", HTTP_POST, []() {
+    if (!requireAuth()) return;
     // Accept any subset of fields
     if (server.hasArg("name")) strncpy(activeProfile.name, server.arg("name").c_str(), 31);
     if (server.hasArg("soakMin")) activeProfile.soakMinutes = server.arg("soakMin").toFloat();
@@ -1108,6 +1124,7 @@ void setupRoutes() {
   });
 
   server.on("/profiles/save", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
     if (server.hasArg("name") && server.arg("name").length() > 0) {
       String n = server.arg("name");
@@ -1130,6 +1147,7 @@ void setupRoutes() {
   });
 
   server.on("/profiles/load", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
     if (!server.hasArg("name") || !server.arg("name").length()) {
       server.send(400, "text/plain", "Missing name"); return;
@@ -1155,6 +1173,7 @@ void setupRoutes() {
   });
 
   server.on("/profiles/delete", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
     if (!server.hasArg("name") || !server.arg("name").length()) {
       server.send(400, "text/plain", "Missing name"); return;
@@ -1173,6 +1192,7 @@ void setupRoutes() {
   // ── Run control ──────────────────────────────────────────────────────────────
   // POST /run  body: mode=bangbang|autoramp&action=start|stop
   server.on("/run", HTTP_POST, []() {
+    if (!requireAuth()) return;
     String modeStr   = server.arg("mode");
     String actionStr = server.arg("action");
 
@@ -1297,6 +1317,7 @@ void setupRoutes() {
   });
 
   server.on("/calibrate", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
         !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
       server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
@@ -1322,6 +1343,7 @@ void setupRoutes() {
   });
 
   server.on("/calibrate/clear", HTTP_POST, []() {
+    if (!requireAuth()) return;
     customUvPerC = 0.0f;
     probeOffset  = 0.0f;
     savePrefs();
@@ -1340,6 +1362,7 @@ void setupRoutes() {
   });
 
   server.on("/config", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (server.hasArg("sp"))    setpoint    = server.arg("sp").toFloat();
     if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
     if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
@@ -1350,6 +1373,7 @@ void setupRoutes() {
   });
 
   server.on("/wifi", HTTP_POST, []() {
+    if (!requireAuth()) return;
     if (server.hasArg("ssid") && server.hasArg("psk")) {
       savedSSID = server.arg("ssid");
       savedPSK  = server.arg("psk");
@@ -1363,6 +1387,7 @@ void setupRoutes() {
   });
 
   server.on("/output", HTTP_POST, []() {
+    if (!requireAuth()) return;
     String mode = server.arg("mode");
     if (mode == "on") {
       manualOverride = true; outputOn = true;  MOSFET_WRITE(true);
@@ -1373,6 +1398,23 @@ void setupRoutes() {
     } else {
       server.send(400, "text/plain", "mode must be on, off, or auto"); return;
     }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/auth", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!server.hasArg("user") || !server.hasArg("pass")) {
+      server.send(400, "text/plain", "Missing user or pass"); return;
+    }
+    String u = server.arg("user"); u.trim();
+    String p = server.arg("pass"); p.trim();
+    if (!u.length() || !p.length()) {
+      server.send(400, "text/plain", "user and pass must not be empty"); return;
+    }
+    webUser = u;
+    webPass = p;
+    savePrefs();
+    DBGLN("Auth credentials updated");
     server.send(200, "text/plain", "OK");
   });
 }

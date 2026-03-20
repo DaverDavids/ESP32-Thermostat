@@ -175,6 +175,17 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <div>Current uV/&deg;C: <span id="uvpc">--</span></div>
     <button type="submit">Save Config</button>
   </form>
+  <div style="margin-top:.8rem;border-top:1px solid #333;padding-top:.6rem;">
+    <strong style="font-size:.85rem;color:#aaa;">&#x1F512; Change Web Password</strong>
+    <label style="margin-top:.4rem;">Username
+      <input type="text" id="authUser" autocomplete="username" placeholder="admin">
+    </label>
+    <label>New Password
+      <input type="password" id="authPass" autocomplete="new-password" placeholder="new password">
+    </label>
+    <button onclick="changeAuth()" style="background:#e94560;margin-top:.4rem;">Update Credentials</button>
+    <div id="authMsg" style="font-size:.85rem;color:#0f9;margin-top:.3rem;"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -829,6 +840,23 @@ async function clearCalibration() {
     document.getElementById('calForm').reset();
     poll();
   } catch(err) { document.getElementById('calResult').textContent = 'Clear failed: ' + err; }
+}
+
+async function changeAuth() {
+  const user = document.getElementById('authUser').value.trim();
+  const pass = document.getElementById('authPass').value.trim();
+  if (!user || !pass) { alert('Both username and password are required.'); return; }
+  try {
+    const r = await fetch('/auth', {
+      method: 'POST',
+      body: new URLSearchParams({ user, pass })
+    });
+    if (!r.ok) throw new Error(await r.text());
+    document.getElementById('authMsg').textContent = 'Credentials updated. Re-login required on next action.';
+    document.getElementById('authPass').value = '';
+  } catch(e) {
+    document.getElementById('authMsg').textContent = 'Failed: ' + e;
+  }
 }
 
 function setOutput(mode) {
