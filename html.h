@@ -305,7 +305,6 @@ async function exportCSV() {
 // ── Run control ───────────────────────────────────────────────────────────────
 async function startRun() {
   const mode = document.getElementById('runModeSelect').value;
-  if (mode === 'autoramp') { alert('Auto-Ramp coming in Stage 2. Using Bang-Bang for now.'); }
   await dbClear();
   await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode === 'autoramp' ? 'autoramp' : 'bangbang', action:'start'})});
   poll();
@@ -420,7 +419,9 @@ async function pollRamp() {
   try {
     const rs = await fetch('/rampstatus').then(r => r.json());
     // Map state name
-    const stateName = (rs.rampState in RAMP_STATE_NAMES) ? RAMP_STATE_NAMES[rs.rampState] : rs.rampState;
+    const stateName = (rs.rampState >= 0 && rs.rampState < RAMP_STATE_NAMES.length)
+      ? RAMP_STATE_NAMES[rs.rampState]
+      : String(rs.rampState);
     const isOvershoot = rs.rampState === 4;
     const stateEl = document.getElementById('rsState');
     if (stateEl) stateEl.textContent = stateName;
@@ -447,7 +448,7 @@ async function pollRamp() {
       coastCur.textContent = curRatio.toFixed(3);
     }
     const coastModel = document.getElementById('rsCoastModel');
-    if (coastModel) coastModel.textContent = 'base=' + rs.coastBase.toFixed(3) + '  slope=' + rs.coastSlope.toFixed(3) + '/100 B0C';
+    if (coastModel) coastModel.textContent = 'base=' + rs.coastBase.toFixed(3) + '  slope=' + rs.coastSlope.toFixed(3) + '/100°C';
 
     const ageEl = document.getElementById('rsAge');
     if (ageEl) {

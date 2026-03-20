@@ -174,24 +174,6 @@ void refitCoastModel() {
   activeProfile.coastBase  = intercept;
 }
 
-bool isStable() {
-  stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
-  stabilityIdx++;
-  if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
-  if (stabilityFilled < STABILITY_WINDOW) return false;
-  float mn = stabilityBuf[0], mx = stabilityBuf[0];
-  for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
-    if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
-    if (stabilityBuf[i] > mx) mx = stabilityBuf[i];
-  }
-  return (mx - mn) < activeProfile.stabilityThreshC;
-}
-
-void resetStabilityBuf() {
-  stabilityIdx    = 0;
-  stabilityFilled = 0;
-}
-
 // ─── SPIFFS run log ───────────────────────────────────────────────────────────
 // Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
 // OR bang-bang auto active). Columns:
@@ -291,6 +273,25 @@ unsigned long bootTime          = 0;
 bool otaStarted    = false;
 bool serverStarted = false;
 
+// ─── Ramp stability helpers ───────────────────────────────────────────
+bool isStable() {
+  stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
+  stabilityIdx++;
+  if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
+  if (stabilityFilled < STABILITY_WINDOW) return false;
+  float mn = stabilityBuf[0], mx = stabilityBuf[0];
+  for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
+    if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
+    if (stabilityBuf[i] > mx) mx = stabilityBuf[i];
+  }
+  return (mx - mn) < activeProfile.stabilityThreshC;
+}
+
+void resetStabilityBuf() {
+  stabilityIdx    = 0;
+  stabilityFilled = 0;
+}
+
 // ─── Button state ─────────────────────────────────────────────────────────────
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
 struct BtnState {
@@ -308,6 +309,7 @@ void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
 float rawTempC(); float medianOf(float* arr, uint8_t n);
 void controlLoop();
+void rampControlLoop();
 void updateButtons(); void updateDisplay();
 void openRunLog();
 void appendRunLog(uint32_t, float, float, uint8_t, uint8_t, uint8_t, uint8_t, float);
@@ -594,14 +596,15 @@ void rampControlLoop() {
   switch (rampState) {
 
     case RS_IDLE:
-      // Transition to HEATING on first call (run was just started)
-      rampStep          = 0;
-      rampState         = RS_HEATING;
+      rampStep           = 0;
+      rampState          = RS_HEATING;
       rampStateEnteredMs = millis();
       rampFireStartTemp  = currentTemp;
       resetStabilityBuf();
       outputOn = true;
       MOSFET_WRITE(true);
+      stepTarget  = activeProfile.stepTargets[0];
+      isFinalStep = (activeProfile.stepCount == 1);
       DBGLN("Ramp: HEATING step 0");
       break;
 
@@ -620,7 +623,7 @@ void rampControlLoop() {
         rampState      = RS_COASTING;
         rampStateEnteredMs = millis();
         resetStabilityBuf();
-        DBGLN("Ramp: COASTING, cutoff=" + String(rampCutoffTemp));
+        DBG("Ramp: COASTING, cutoff="); DBGLN(rampCutoffTemp);
       }
       break;
     }
@@ -829,8 +832,18 @@ void setupRoutes() {
 
   // ── Ramp status (Stage 2) ───────────────────────────────────────────────
   server.on("/rampstatus", HTTP_GET, []() {
-    // Minimal learned data (empty by default in Stage 2)
-    String learned = "[]";
+    // Build learned steps JSON array
+    String learned = "[";
+    for (uint8_t i = 0; i < learnedCount; i++) {
+      if (i) learned += ",";
+      learned += "{\"step\":"       + String(i)
+               + ",\"fireStart\":" + String(learnedFireStartTemp[i], 1)
+               + ",\"cutoff\":"    + String(learnedCutoffTemp[i],    1)
+               + ",\"peak\":"      + String(learnedPeakTemp[i],      1)
+               + ",\"coastRatio\":" + String(learnedCoastRatio[i],   4)
+               + "}";
+    }
+    learned += "]";
 
     // Current predicted peak (only meaningful in RS_HEATING)
     float rise = currentTemp - rampFireStartTemp;
