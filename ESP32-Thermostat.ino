@@ -215,6 +215,7 @@ bool profileFromJson(const String& json, RampProfile& p) {
   String name = strVal("name");
   if (!name.length()) return false;
   strncpy(p.name, name.c_str(), 31);
+  p.name[31] = '\0';
   p.soakMinutes      = numVal("soakMinutes");
   p.stabilityThreshC = numVal("stabilityThreshC");
   p.coastBase        = numVal("coastBase");
@@ -318,6 +319,7 @@ void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
 bool             prefsDirty = false;
+unsigned long    prefsDirtyMs = 0;
 WebServer        server(80);
 DNSServer        dns;
 Adafruit_INA219  ina219;
@@ -527,6 +529,7 @@ void loop() {
     btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
     btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
     prefsDirty = true;
+    prefsDirtyMs = now;
   }
   if (btns[1].phase == BTN_HELD && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
@@ -534,6 +537,7 @@ void loop() {
     btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
     btns[1].nextFire        = now + (unsigned long)btns[1].currentInterval;
     prefsDirty = true;
+    prefsDirtyMs = now;
   }
 
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
@@ -556,6 +560,11 @@ void loop() {
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
     if (now - bootTime >= IP_SPLASH_MS) updateDisplay();
+  }
+
+  if (prefsDirty && (millis() - prefsDirtyMs) > 2000UL) {
+    savePrefs();
+    prefsDirty = false;
   }
 }
 
@@ -608,8 +617,8 @@ void updateButtons() {
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
           btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
-          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); prefsDirty = true; }
-          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); prefsDirty = true; }
+          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); prefsDirty = true; prefsDirtyMs = now; }
+          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); prefsDirty = true; prefsDirtyMs = now; }
         }
         break;
       case BTN_HELD:
@@ -917,6 +926,7 @@ void loadPrefs() {
   webPass = prefs.getString("wpass", "thermostat");
   // Active ramp profile (Stage 4)
   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
+  activeProfile.name[31] = '\0';
   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
   activeProfile.stabilityThreshC = prefs.getFloat("rp_stab",       2.0f);
   activeProfile.coastBase        = prefs.getFloat("rp_cbase",     0.40f);
@@ -1089,7 +1099,10 @@ void setupRoutes() {
   server.on("/profile", HTTP_POST, []() {
     if (!requireAuth()) return;
     // Accept any subset of fields
-    if (server.hasArg("name")) strncpy(activeProfile.name, server.arg("name").c_str(), 31);
+    if (server.hasArg("name")) {
+      strncpy(activeProfile.name, server.arg("name").c_str(), 31);
+      activeProfile.name[31] = '\0';
+    }
     if (server.hasArg("soakMin")) activeProfile.soakMinutes = server.arg("soakMin").toFloat();
     if (server.hasArg("stability")) activeProfile.stabilityThreshC = server.arg("stability").toFloat();
     if (server.hasArg("coastBase")) activeProfile.coastBase = server.arg("coastBase").toFloat();
@@ -1147,6 +1160,7 @@ void setupRoutes() {
         if (!isAlphaNumeric(c) && c != '-' && c != '_') { n.setCharAt(i, '_'); }
       }
       strncpy(activeProfile.name, n.c_str(), 31);
+      activeProfile.name[31] = '\0';
     }
     String path = String(PROFILE_DIR) + "/" + activeProfile.name + ".json";
     File f = SPIFFS.open(path, FILE_WRITE);
@@ -1254,6 +1268,8 @@ void setupRoutes() {
     uint32_t since = 0;
     if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
 
+    if (runLogFile) runLogFile.flush();
+
     // Try SPIFFS
     if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
       File f = SPIFFS.open(LOG_PATH, FILE_READ);
@@ -1299,6 +1315,8 @@ void setupRoutes() {
   // ── Full log download ─────────────────────────────────────────────────────────
   // GET /log/full  -> entire runlog.csv as file download
   server.on("/log/full", HTTP_GET, []() {
+    if (runLogFile) runLogFile.flush();
+
     if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
       File f = SPIFFS.open(LOG_PATH, FILE_READ);
       if (f) {
