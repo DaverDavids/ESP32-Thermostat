@@ -278,8 +278,10 @@ bool serverStarted = false;
 bool isStable() {
   stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
   stabilityIdx++;
-  if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
-  if (stabilityFilled < STABILITY_WINDOW) return false;
+  if (stabilityFilled < STABILITY_WINDOW) {
+    stabilityFilled++;
+    if (stabilityFilled < STABILITY_WINDOW) return false;
+  }
   float mn = stabilityBuf[0], mx = stabilityBuf[0];
   for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
     if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
@@ -611,12 +613,23 @@ void rampControlLoop() {
     case RS_IDLE: break;
 
     case RS_HEATING: {
-      // Predict where we'll peak if we cut off now
+      if (currentTemp >= stepTarget) {
+        outputOn = false;
+        MOSFET_WRITE(false);
+        rampCutoffTemp = currentTemp;
+        rampPeakTemp   = currentTemp;
+        rampState      = RS_COASTING;
+        rampStateEnteredMs = millis();
+        resetStabilityBuf();
+        coastingDropCount = 0;
+        DBG("Ramp: HEATING hard cutoff at="); DBGLN(currentTemp);
+        break;
+      }
+
       float rise = currentTemp - rampFireStartTemp;
       float ratio = effectiveCoastRatio(stepTarget);
       float predictedPeak = currentTemp + rise * ratio;
 
-      // Cut off when predicted peak >= step target
       if (predictedPeak >= stepTarget) {
         outputOn = false;
         MOSFET_WRITE(false);
@@ -643,7 +656,12 @@ void rampControlLoop() {
         coastingDropCount = 0;
       }
 
-      if (coastingDropCount >= 3) {
+      bool coastTimeout = (millis() - rampStateEnteredMs) > 90000UL;
+
+      if (coastingDropCount >= 3 || coastTimeout) {
+        if (coastTimeout && coastingDropCount < 3) {
+          DBG("Ramp: COASTING timeout, forcing peak="); DBGLN(rampPeakTemp);
+        }
         coastingDropCount = 0;
         float rise = rampCutoffTemp - rampFireStartTemp;
         float coast = (rise > 1.0f) ? (rampPeakTemp - rampCutoffTemp) / rise : 0.0f;
