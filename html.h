@@ -58,6 +58,44 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div id="runStatus" style="margin-top:.5rem;font-size:.9rem;color:#aaa;">No run active.</div>
 </div>
 
+  <div class="card" id="rampPanel" style="display:none;">
+    <h2>&#x1F525; Auto-Ramp Status</h2>
+    <table style="width:100%;font-size:.9rem;border-collapse:collapse;" id="rampTable">
+      <tr><td style="color:#aaa;width:45%">State</td>       <td id="rsState">--</td></tr>
+      <tr><td style="color:#aaa;">Step</td>                 <td id="rsStep">--</td></tr>
+      <tr><td style="color:#aaa;">Step Target</td>          <td id="rsTarget">--</td></tr>
+      <tr><td style="color:#aaa;">Predicted Peak</td>       <td id="rsPredPeak">--</td></tr>
+      <tr><td style="color:#aaa;">Overshoot</td>            <td id="rsOvershoot">--</td></tr>
+      <tr><td style="color:#aaa;">Coast Ratio (cur est)</td><td id="rsCoastCur">--</td></tr>
+      <tr><td style="color:#aaa;">Coast Model</td>          <td id="rsCoastModel">--</td></tr>
+      <tr><td style="color:#aaa;">Time in State</td>        <td id="rsAge">--</td></tr>
+      <tr><td style="color:#aaa;">Soak Remaining</td>       <td id="rsSoakRemain">--</td></tr>
+    </table>
+    <div style="margin-top:.8rem;">
+      <strong style="color:#aaa;font-size:.85rem;">Learned Steps</strong>
+      <table id="learnedBody" style="width:100%;font-size:.8rem;margin-top:.3rem;border-collapse:collapse;"></table>
+    </div>
+  </div>
+
+  <div class="card" id="profilePanel" style="display:none;">
+    <h2>&#x1F4CB; Ramp Profile</h2>
+    <form id="profileForm">
+      <label>Profile Name<input type="text" name="name" id="profName"></label>
+      <label>Step Targets (&deg;C, comma-separated)
+        <input type="text" name="steps" id="profSteps" placeholder="150,280,380,440,470,490,500">
+      </label>
+      <label>Final Soak (minutes)<input type="number" step="1" name="soakMin" id="profSoak"></label>
+      <label>Stability Threshold (&deg;C / 30s)<input type="number" step="0.5" name="stability" id="profStability"></label>
+      <label>Coast Base (ratio at 0&deg;C)<input type="number" step="0.01" name="coastBase" id="profCoastBase"></label>
+      <label>Coast Slope (ratio drop per 100&deg;C)<input type="number" step="0.005" name="coastSlope" id="profCoastSlope"></label>
+      <div style="display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap;">
+        <button type="submit">Apply to Device</button>
+        <button type="button" onclick="loadProfileFromDevice()" style="background:#555;">&#x21BA; Refresh from Device</button>
+      </div>
+    </form>
+    <div id="profileMsg" style="margin-top:.4rem;font-size:.85rem;color:#0f9;"></div>
+  </div>
+
 <div class="card">
   <h2>&#x1F4CA; History</h2>
   <canvas id="chart"></canvas>
@@ -301,6 +339,7 @@ function drawChart(data, sp) {
 }
 
 let currentSetpoint = 500;
+const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
 
 async function poll() {
   try {
@@ -367,11 +406,85 @@ async function poll() {
 
     // Sync log if run active
     if (st.runActive) syncLog();
+    // Ramp status polling (Stage 2) - only in autoramp mode
+    if (document.getElementById('runModeSelect')) {
+      if (document.getElementById('runModeSelect').value === 'autoramp') {
+        // Fire ramp status request in the same cycle
+        pollRamp();
+      }
+    }
   } catch(e) { console.warn('poll error', e); }
 }
 
+async function pollRamp() {
+  try {
+    const rs = await fetch('/rampstatus').then(r => r.json());
+    // Map state name
+    const stateName = (rs.rampState in RAMP_STATE_NAMES) ? RAMP_STATE_NAMES[rs.rampState] : rs.rampState;
+    const isOvershoot = rs.rampState === 4;
+    const stateEl = document.getElementById('rsState');
+    if (stateEl) stateEl.textContent = stateName;
+    if (stateEl) stateEl.style.color = isOvershoot ? '#e74c3c' : '#eee';
+
+    const stepEl = document.getElementById('rsStep');
+    if (stepEl) stepEl.textContent = (rs.rampStep + 1) + ' of ' + rs.stepCount + '  (' + rs.stepTarget.toFixed(1) + '\u00B0C)';
+    const targetEl = document.getElementById('rsTarget');
+    if (targetEl) targetEl.textContent = rs.stepTarget.toFixed(1) + '\u00B0C';
+    const predEl = document.getElementById('rsPredPeak');
+    if (predEl) predEl.textContent = rs.rampState === 1 ? rs.predictedPeak.toFixed(1) + '\u00B0C' : '--';
+    const overEl = document.getElementById('rsOvershoot');
+    if (rs.overshootAmt > 0) {
+      overEl.textContent = '+' + rs.overshootAmt.toFixed(1) + '\u00B0C \u26A0';
+      overEl.style.color = '#e74c3c';
+    } else {
+      overEl.textContent = 'none';
+      overEl.style.color = '#0f9';
+    }
+
+    const coastCur = document.getElementById('rsCoastCur');
+    if (coastCur) {
+      const curRatio = rs.coastBase - rs.coastSlope * (rs.stepTarget / 100.0);
+      coastCur.textContent = curRatio.toFixed(3);
+    }
+    const coastModel = document.getElementById('rsCoastModel');
+    if (coastModel) coastModel.textContent = 'base=' + rs.coastBase.toFixed(3) + '  slope=' + rs.coastSlope.toFixed(3) + '/100 B0C';
+
+    const ageEl = document.getElementById('rsAge');
+    if (ageEl) {
+      const ageS = Math.floor(rs.stateAgeMs / 1000);
+      ageEl.textContent = Math.floor(ageS/60) + ':' + String(ageS%60).padStart(2,'0');
+    }
+
+    const soakEl = document.getElementById('rsSoakRemain');
+    if (soakEl) soakEl.textContent = rs.rampState === 5 ? Math.floor(rs.soakRemainS/60) + ':' + String(rs.soakRemainS%60).padStart(2,'0') + ' remaining' : '--';
+
+    // Learned steps table
+    const tbody = document.getElementById('learnedBody');
+    if (tbody) {
+      tbody.innerHTML = '';
+      if (rs.learned && Array.isArray(rs.learned)) {
+        rs.learned.forEach((s, idx) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${idx + 1}</td>`
+            + `<td style="text-align:right">${s.fireStart.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right">${s.cutoff.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right;color:${s.peak > rs.stepTarget+10 ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`;
+          tbody.appendChild(tr);
+        });
+      }
+      // Fill blanks for remaining steps if needed
+      for (let i = rs.learnedCount; i < rs.stepCount - 1; i++) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td style="color:#555">${i+1}</td>` + `<td colspan="4" style="color:#555;text-align:right">--</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+  } catch(e) { console.warn('pollRamp error', e); }
+}
+
 setInterval(poll, 1000);
-openDB().then(() => { updateLogInfo(); poll(); });
+openDB().then(() => { updateLogInfo(); loadProfileFromDevice(); poll(); });
 
 // ── Config form ───────────────────────────────────────────────────────────────
 document.getElementById('cfgForm').addEventListener('submit', async e => {

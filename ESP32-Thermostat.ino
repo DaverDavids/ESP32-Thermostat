@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <math.h>   // for isnan, fabsf - explicit for clarity
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
@@ -77,6 +78,119 @@ const float    SP_STEP_ACCEL        = 1.15f;
 // MODE_AUTO_RAMP : new staged ramp (Stage 2+)
 enum RunMode { MODE_BANG_BANG = 0, MODE_AUTO_RAMP = 1 };
 RunMode runMode = MODE_BANG_BANG;
+
+// ─── Ramp support (Stage 2) ───────────────────────────────────────────
+#define RAMP_MAX_STEPS 8
+
+struct RampProfile {
+  char    name[32];
+  float   stepTargets[RAMP_MAX_STEPS]; // °C, last entry = finalTarget
+  uint8_t stepCount;                   // total steps including final
+  float   soakMinutes;                 // hold time at final temp
+  float   stabilityThreshC;            // °C change over 30s to call stable
+  float   coastBase;                   // coast ratio at 0°C (y-intercept of linear model)
+  float   coastSlope;                  // change in coast ratio per 100°C (negative)
+  bool    complete;                    // was this profile learned on a full run?
+};
+
+// Default active profile (Stage 2 boot defaults; Stage 4 will persist but today we boot with defaults)
+RampProfile activeProfile = {
+  "default",
+  {150.0f, 280.0f, 380.0f, 440.0f, 470.0f, 490.0f, 500.0f},
+  7,
+  30.0f,
+  2.0f,
+  0.40f,   // coastBase: initial guess, will be updated each step
+  0.03f,   // coastSlope: ratio drops ~0.03 per 100°C
+  false
+};
+
+// RampState machine (Stage 2)
+enum RampState {
+  RS_IDLE            = 0,
+  RS_HEATING         = 1,
+  RS_COASTING        = 2,
+  RS_SOAKING         = 3,
+  RS_OVERSHOOT_WAIT  = 4,
+  RS_FINAL_SOAK      = 5,
+  RS_DONE            = 6
+};
+
+// Per-run learned data (arrays accumulate during a run)
+// Indexed by step number (0 to stepCount-2)
+#define MAX_LEARNED_STEPS (RAMP_MAX_STEPS - 1)
+
+float learnedFireStartTemp[MAX_LEARNED_STEPS];  // probe temp when element turned ON
+float learnedCutoffTemp[MAX_LEARNED_STEPS];     // probe temp when element turned OFF
+float learnedPeakTemp[MAX_LEARNED_STEPS];       // highest probe temp after cutoff
+float learnedCoastRatio[MAX_LEARNED_STEPS];     // (peak-cutoff)/(cutoff-fireStart)
+uint8_t learnedCount = 0;                       // how many steps have full data
+
+// Ramp working variables
+RampState rampState    = RS_IDLE;
+uint8_t   rampStep     = 0;        // current step index into activeProfile.stepTargets
+float     rampFireStartTemp = 0.0f;
+float     rampCutoffTemp    = 0.0f;
+float     rampPeakTemp      = 0.0f;  // tracks max temp seen during COASTING
+float     rampOvershootAmt  = 0.0f;  // °C above step target at peak (0 if none)
+unsigned long rampStateEnteredMs = 0; // millis() when current state began
+unsigned long finalSoakStartMs   = 0;
+// Stability detection: sliding window over last 30s = 60 samples at 2Hz
+#define STABILITY_WINDOW 60
+float stabilityBuf[STABILITY_WINDOW];
+uint8_t stabilityIdx   = 0;
+uint8_t stabilityFilled = 0;  // 0 until buffer has at least STABILITY_WINDOW entries
+
+// Helpers (forward declarations)
+float effectiveCoastRatio(float tempC);
+void refitCoastModel();
+bool isStable();
+void resetStabilityBuf();
+
+// Prototypes for the ramp state machine
+void rampControlLoop();
+
+// ─── Ramp support functions ───────────────────────────────────────────
+float effectiveCoastRatio(float tempC) {
+  float r = activeProfile.coastBase - activeProfile.coastSlope * (tempC / 100.0f);
+  return max(r, 0.05f);
+}
+
+void refitCoastModel() {
+  if (learnedCount < 2) return;
+  float sumX=0, sumY=0, sumXY=0, sumX2=0;
+  float n = (float)learnedCount;
+  for (uint8_t i = 0; i < learnedCount; i++) {
+    float x = learnedCutoffTemp[i];
+    float y = learnedCoastRatio[i];
+    sumX  += x; sumY  += y;
+    sumXY += x * y; sumX2 += x * x;
+  }
+  float denom = n * sumX2 - sumX * sumX;
+  if (fabsf(denom) < 1e-6f) return;  // degenerate
+  float slopePerC = (n * sumXY - sumX * sumY) / denom;
+  float intercept  = (sumY - slopePerC * sumX) / n;
+  activeProfile.coastSlope = -slopePerC * 100.0f;
+  activeProfile.coastBase  = intercept;
+}
+
+bool isStable() {
+  stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
+  stabilityIdx++;
+  if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
+  if (stabilityFilled < STABILITY_WINDOW) return false;
+  float mn = stabilityBuf[0], mx = stabilityBuf[0];
+  for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
+    if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
+    if (stabilityBuf[i] > mx) mx = stabilityBuf[i];
+  }
+  return (mx - mn) < activeProfile.stabilityThreshC;
+}
+
+void resetStabilityBuf() {
+  stabilityIdx    = 0;
+  stabilityFilled = 0;
+}
 
 // ─── SPIFFS run log ───────────────────────────────────────────────────────────
 // Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
@@ -295,13 +409,22 @@ void loop() {
     medCount = 0;
 
     // Control
-    if (!manualOverride) controlLoop();
+    if (!manualOverride) {
+      if (runMode == MODE_AUTO_RAMP && runActive) {
+        rampControlLoop();
+      } else {
+        controlLoop();
+      }
+    }
 
     // Log if run is active (auto mode running)
     if (runActive) {
       uint32_t t_s = (uint32_t)((now - runStartMs) / 1000UL);
+      float coastEst = (learnedCount > 0)
+        ? effectiveCoastRatio(currentTemp)
+        : activeProfile.coastBase;
       appendRunLog(t_s, currentTemp, setpoint, outputOn ? 1 : 0,
-                   (uint8_t)runMode, 0, 0, 0.0f);
+                   (uint8_t)runMode, (uint8_t)rampState, rampStep, coastEst);
     }
   }
 
@@ -462,6 +585,127 @@ void controlLoop() {
   MOSFET_WRITE(outputOn);
 }
 
+// ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
+// This is called at ~2Hz when autoramp is active and replaces controlLoop
+void rampControlLoop() {
+  float stepTarget = activeProfile.stepTargets[rampStep];
+  bool  isFinalStep = (rampStep == activeProfile.stepCount - 1);
+
+  switch (rampState) {
+
+    case RS_IDLE:
+      // Transition to HEATING on first call (run was just started)
+      rampStep          = 0;
+      rampState         = RS_HEATING;
+      rampStateEnteredMs = millis();
+      rampFireStartTemp  = currentTemp;
+      resetStabilityBuf();
+      outputOn = true;
+      MOSFET_WRITE(true);
+      DBGLN("Ramp: HEATING step 0");
+      break;
+
+    case RS_HEATING: {
+      // Predict where we'll peak if we cut off now
+      float rise = currentTemp - rampFireStartTemp;
+      float ratio = effectiveCoastRatio(stepTarget);
+      float predictedPeak = currentTemp + rise * ratio;
+
+      // Cut off when predicted peak >= step target
+      if (predictedPeak >= stepTarget) {
+        outputOn = false;
+        MOSFET_WRITE(false);
+        rampCutoffTemp = currentTemp;
+        rampPeakTemp   = currentTemp;
+        rampState      = RS_COASTING;
+        rampStateEnteredMs = millis();
+        resetStabilityBuf();
+        DBGLN("Ramp: COASTING, cutoff=" + String(rampCutoffTemp));
+      }
+      break;
+    }
+
+    case RS_COASTING:
+      // Track peak
+      if (currentTemp > rampPeakTemp) rampPeakTemp = currentTemp;
+
+      // Detect inflection: temp has peaked (falling for at least 3 consecutive samples)
+      // Use simple check: current temp < peak by more than noise (2°C)
+      if (rampPeakTemp - currentTemp > 2.0f) {
+        // Compute learned coast ratio for this step
+        float rise = rampCutoffTemp - rampFireStartTemp;
+        float coast = (rise > 1.0f) ? (rampPeakTemp - rampCutoffTemp) / rise : 0.0f;
+
+        if (learnedCount < MAX_LEARNED_STEPS) {
+          learnedFireStartTemp[learnedCount] = rampFireStartTemp;
+          learnedCutoffTemp[learnedCount]    = rampCutoffTemp;
+          learnedPeakTemp[learnedCount]      = rampPeakTemp;
+          learnedCoastRatio[learnedCount]    = coast;
+          learnedCount++;
+          refitCoastModel();
+        }
+
+        rampOvershootAmt = max(0.0f, rampPeakTemp - stepTarget);
+        DBG("Ramp: peak="); DBG(rampPeakTemp);
+        DBG(" overshoot="); DBGLN(rampOvershootAmt);
+
+        resetStabilityBuf();
+        rampState = (rampOvershootAmt > 10.0f) ? RS_OVERSHOOT_WAIT : RS_SOAKING;
+        rampStateEnteredMs = millis();
+      }
+      break;
+
+    case RS_SOAKING:
+    case RS_OVERSHOOT_WAIT:
+      // Maintain bang-bang around step target while soaking
+      if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
+      if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
+
+      if (isStable()) {
+        if (isFinalStep) {
+          // Transition to final soak
+          rampState        = RS_FINAL_SOAK;
+          finalSoakStartMs = millis();
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          DBGLN("Ramp: FINAL_SOAK started");
+        } else {
+          // Advance to next step
+          rampStep++;
+          rampState         = RS_HEATING;
+          rampFireStartTemp = currentTemp;
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          outputOn = true;
+          MOSFET_WRITE(true);
+          DBG("Ramp: HEATING step "); DBGLN(rampStep);
+        }
+      }
+      break;
+
+    case RS_FINAL_SOAK:
+      // Maintain bang-bang around final target
+      if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
+      if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
+
+      if ((millis() - finalSoakStartMs) >= (unsigned long)(activeProfile.soakMinutes * 60000.0f)) {
+        outputOn = false;
+        MOSFET_WRITE(false);
+        rampState  = RS_DONE;
+        runActive  = false;
+        manualOverride = true;
+        rampStateEnteredMs = millis();
+        DBGLN("Ramp: DONE");
+      }
+      break;
+
+    case RS_DONE:
+      outputOn = false;
+      MOSFET_WRITE(false);
+      break;
+  }
+}
+
 // ─── WiFi helpers ─────────────────────────────────────────────────────────────
 void startSTA() {
   WiFi.mode(WIFI_STA);
@@ -583,6 +827,85 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
+  // ── Ramp status (Stage 2) ───────────────────────────────────────────────
+  server.on("/rampstatus", HTTP_GET, []() {
+    // Minimal learned data (empty by default in Stage 2)
+    String learned = "[]";
+
+    // Current predicted peak (only meaningful in RS_HEATING)
+    float rise = currentTemp - rampFireStartTemp;
+    float predPeak = (rampState == RS_HEATING)
+      ? currentTemp + rise * effectiveCoastRatio(activeProfile.stepTargets[rampStep])
+      : 0.0f;
+
+    unsigned long stateAgeMs = millis() - rampStateEnteredMs;
+    long soakRemain = 0;
+    if (rampState == RS_FINAL_SOAK) {
+      long total = (long)(activeProfile.soakMinutes * 60.0f);
+      soakRemain = total - (long)((millis() - finalSoakStartMs) / 1000UL);
+      if (soakRemain < 0) soakRemain = 0;
+    }
+
+    String j = "{\"rampState\":" + String((int)rampState)
+             + ",\"rampStep\":" + String(rampStep)
+             + ",\"stepCount\":" + String(activeProfile.stepCount)
+             + ",\"stepTarget\":" + String(activeProfile.stepTargets[rampStep], 1)
+             + ",\"finalTarget\":" + String(activeProfile.stepTargets[activeProfile.stepCount-1], 1)
+             + ",\"predictedPeak\":" + String(predPeak, 1)
+             + ",\"overshootAmt\":" + String(rampOvershootAmt, 1)
+             + ",\"coastBase\":" + String(activeProfile.coastBase, 4)
+             + ",\"coastSlope\":" + String(activeProfile.coastSlope, 4)
+             + ",\"stateAgeMs\":" + String(stateAgeMs)
+             + ",\"soakRemainS\":" + String(soakRemain)
+             + ",\"learnedCount\":" + String(learnedCount)
+             + ",\"learned\":" + learned
+             + "}";
+  server.send(200, "application/json", j);
+  });
+
+  // /profile: read current active ramp profile
+  server.on("/profile", HTTP_GET, []() {
+    String steps = "[";
+    for (uint8_t i = 0; i < activeProfile.stepCount; i++) {
+      if (i) steps += ",";
+      steps += String(activeProfile.stepTargets[i], 1);
+    }
+    steps += "]";
+    String j = "{\"name\":\"" + String(activeProfile.name) + "\""
+             + ",\"stepTargets\":" + steps
+             + ",\"stepCount\":" + String(activeProfile.stepCount)
+             + ",\"soakMinutes\":" + String(activeProfile.soakMinutes, 1)
+             + ",\"stabilityThresh\":" + String(activeProfile.stabilityThreshC, 1)
+             + ",\"coastBase\":" + String(activeProfile.coastBase, 4)
+             + ",\"coastSlope\":" + String(activeProfile.coastSlope, 4)
+             + ",\"complete\":" + String(activeProfile.complete ? 1 : 0)
+             + "}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/profile", HTTP_POST, []() {
+    // Accept any subset of fields
+    if (server.hasArg("name")) strncpy(activeProfile.name, server.arg("name").c_str(), 31);
+    if (server.hasArg("soakMin")) activeProfile.soakMinutes = server.arg("soakMin").toFloat();
+    if (server.hasArg("stability")) activeProfile.stabilityThreshC = server.arg("stability").toFloat();
+    if (server.hasArg("coastBase")) activeProfile.coastBase = server.arg("coastBase").toFloat();
+    if (server.hasArg("coastSlope")) activeProfile.coastSlope = server.arg("coastSlope").toFloat();
+    // Step targets: comma-separated string, e.g. "150,300,420,470,490,500"
+    if (server.hasArg("steps")) {
+      String s = server.arg("steps");
+      uint8_t n = 0;
+      int start = 0, comma;
+      while ((comma = s.indexOf(',', start)) != -1 && n < RAMP_MAX_STEPS) {
+        activeProfile.stepTargets[n++] = s.substring(start, comma).toFloat();
+        start = comma + 1;
+      }
+      if (start < (int)s.length() && n < RAMP_MAX_STEPS)
+        activeProfile.stepTargets[n++] = s.substring(start).toFloat();
+      activeProfile.stepCount = n;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
   // ── Run control ──────────────────────────────────────────────────────────────
   // POST /run  body: mode=bangbang|autoramp&action=start|stop
   server.on("/run", HTTP_POST, []() {
@@ -597,6 +920,20 @@ void setupRoutes() {
       cacheCount = 0;
       manualOverride = false;
       openRunLog();
+      // Stage 2: Reset ramp state for a fresh run if Auto Ramp is selected
+      if (runMode == MODE_AUTO_RAMP) {
+        rampState         = RS_IDLE;
+        rampStep          = 0;
+        rampOvershootAmt  = 0.0f;
+        learnedCount      = 0;
+        finalSoakStartMs  = 0;
+        resetStabilityBuf();
+        // Clear learned arrays
+        memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+        memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+        memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+        memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+      }
       DBGLN("Run started mode=" + modeStr);
     } else if (actionStr == "stop") {
       runActive      = false;
