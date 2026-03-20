@@ -380,6 +380,7 @@ function drawChart(data, sp) {
 }
 
 let currentSetpoint = 500;
+let wasRunActive = false;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
 
 async function poll() {
@@ -410,10 +411,24 @@ async function poll() {
       rsEl.textContent = '\u25CF Running \u2022 Mode: ' + mLabel +
         ' \u2022 Elapsed: ' + m + ':' + String(s).padStart(2,'0');
       rsEl.style.color = '#2ecc71';
+
+      const isRamp = st.runMode === 1;
+      document.getElementById('rampPanel').style.display    = isRamp ? 'block' : 'none';
+      document.getElementById('profilePanel').style.display = isRamp ? 'block' : 'none';
+      document.getElementById('runModeSelect').value = isRamp ? 'autoramp' : 'bangbang';
     } else {
-      rsEl.textContent = 'No run active.';
-      rsEl.style.color = '#aaa';
+      if (wasRunActive && !st.runActive) {
+        const wasRamp = (document.getElementById('runModeSelect').value === 'autoramp');
+        rsEl.textContent = wasRamp
+          ? '\u2705 Auto-Ramp run complete.'
+          : '\u25A0 Run stopped.';
+        rsEl.style.color = wasRamp ? '#0f9' : '#aaa';
+      } else {
+        rsEl.textContent = 'No run active.';
+        rsEl.style.color = '#aaa';
+      }
     }
+    wasRunActive = st.runActive;
 
     if (st.cjcC   !== undefined) document.getElementById('cjcC').textContent    = st.cjcC.toFixed(1);
     if (st.shuntMV!== undefined) document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
@@ -508,7 +523,7 @@ async function pollRamp() {
           tr.innerHTML = `<td>${idx + 1}</td>`
             + `<td style="text-align:right">${s.fireStart.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.cutoff.toFixed(0)}\u00B0C</td>`
-            + `<td style="text-align:right;color:${s.peak > s.target+10 ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right;color:${(s.target !== undefined && s.peak > s.target+10) ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`;
           tbody.appendChild(tr);
         });
