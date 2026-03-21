@@ -53,6 +53,8 @@ const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
 const float    OUTLIER_MAX_JUMP = 150.0f;
 const float    SHUNT_MIN_MV     =  -5.0f;
+uint8_t        jumpRejectCount  = 0;
+const uint8_t  JUMP_REJECT_MAX  = 10;
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
 #define MEDIAN_N 9
@@ -771,8 +773,15 @@ float rawTempC() {
   }
   if (!isnan(lastGoodTemp) && fabsf(candidate - lastGoodTemp) > OUTLIER_MAX_JUMP) {
     DBG("Jump reject: "); DBGLN(candidate);
-    return lastGoodTemp;
+    jumpRejectCount++;
+    if (jumpRejectCount >= JUMP_REJECT_MAX) {
+      lastGoodTemp = NAN;
+      jumpRejectCount = 0;
+      DBGLN("Jump lock cleared");
+    }
+    return isnan(lastGoodTemp) ? candidate : lastGoodTemp;
   }
+  jumpRejectCount = 0;
   lastShuntMV  = smV;
   lastGoodTemp = candidate;
   return candidate;
