@@ -499,7 +499,7 @@ async function startRun() {
   runChartCurrentStep = 0;
   await dbClear();
   drawRunChart();
-  await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode === 'autoramp' ? 'autoramp' : 'bangbang', action:'start'})});
+  await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode, action:'start'})});
 }
 
 async function stopRun() {
@@ -517,6 +517,7 @@ function drawRunChart() {
     const w = c.offsetWidth || 300;
     c.width  = w;
     c.height = 220;
+    const h = c.height;
     const ctx = c.getContext('2d');
     ctx.clearRect(0, 0, w, h);
 
