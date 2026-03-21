@@ -73,11 +73,20 @@ const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
 
-// ─── Run modes ────────────────────────────────────────────────────────────────
-// MODE_BANG_BANG : existing hysteresis control (manualOverride=false)
-// MODE_AUTO_RAMP : new staged ramp (Stage 2+)
-enum RunMode { MODE_BANG_BANG = 0, MODE_AUTO_RAMP = 1 };
-RunMode runMode = MODE_BANG_BANG;
+// ─── Run mode / control state ────────────────────────────────────────────────
+enum RunMode { MODE_MANUAL = 0, MODE_BANG_BANG = 1, MODE_AUTO_RAMP = 2 };
+RunMode selectedMode = MODE_MANUAL;
+bool    modeRunning  = false;
+bool    heatRequested = false;
+bool    stopLatched  = false;
+
+unsigned long modeOverlayUntil = 0;
+#define MODE_OVERLAY_MS 1500
+
+uint8_t  estopPressCount = 0;
+unsigned long estopWindowStart = 0;
+#define ESTOP_PRESSES   3
+#define ESTOP_WINDOW_MS 1000
 
 // ─── Ramp support (Stage 2) ───────────────────────────────────────────
 #define RAMP_MAX_STEPS 8
@@ -333,7 +342,6 @@ float    lastShuntMV =   0.0f;
 float    lastGoodTemp   = NAN;
 bool     outputOn       = false;
 bool     apMode         = false;
-bool     manualOverride = true;   // boot into manual OFF
 
 float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
@@ -397,11 +405,23 @@ struct BtnState {
   float     currentStep;
 } btns[3];
 
+// ─── Heater gatekeeper ─────────────────────────────────────────────────────────
+void applyHeater(bool requestOn) {
+  if (stopLatched || !requestOn) {
+    outputOn = false;
+    MOSFET_WRITE(false);
+  } else {
+    outputOn = true;
+    MOSFET_WRITE(true);
+  }
+}
+
 // ─── Forward declarations ─────────────────────────────────────────────────────
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
 float rawTempC(); float medianOf(float* arr, uint8_t n);
+void applyHeater(bool);
 void controlLoop();
 void rampControlLoop();
 void updateButtons(); void updateDisplay();
@@ -414,7 +434,7 @@ void setup() {
   delay(200);
 
   pinMode(PIN_MOSFET, OUTPUT);
-  MOSFET_WRITE(false);
+  applyHeater(false);
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
@@ -504,42 +524,22 @@ void loop() {
 
     medCount = 0;
 
-    // Control
-    if (!manualOverride) {
-      if (runMode == MODE_AUTO_RAMP && runActive) {
+    if (!stopLatched && modeRunning) {
+      if (selectedMode == MODE_AUTO_RAMP && runActive) {
         rampControlLoop();
-      } else {
+      } else if (selectedMode == MODE_BANG_BANG) {
         controlLoop();
       }
     }
 
-    // Log if run is active (auto mode running)
     if (runActive) {
       uint32_t t_s = (uint32_t)((now - runStartMs) / 1000UL);
       float coastEst = (learnedCount > 0)
         ? effectiveCoastRatio(currentTemp)
         : activeProfile.coastBase;
       appendRunLog(t_s, currentTemp, setpoint, outputOn ? 1 : 0,
-                   (uint8_t)runMode, (uint8_t)rampState, rampStep, coastEst);
+                   (uint8_t)selectedMode, (uint8_t)rampState, rampStep, coastEst);
     }
-  }
-
-  // Button hold ramp for setpoint
-  if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
-    setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
-    btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
-    btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
-    btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
-    prefsDirty = true;
-    prefsDirtyMs = now;
-  }
-  if (btns[1].phase == BTN_HELD && now >= btns[1].nextFire) {
-    setpoint = max(setpoint - btns[1].currentStep, 0.0f);
-    btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
-    btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
-    btns[1].nextFire        = now + (unsigned long)btns[1].currentInterval;
-    prefsDirty = true;
-    prefsDirtyMs = now;
   }
 
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
@@ -572,32 +572,70 @@ void loop() {
 
 // ─── Display ──────────────────────────────────────────────────────────────────
 void updateDisplay() {
+  unsigned long now = millis();
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
 
-  const int NUM_Y   =  4;
-  const int LBL_Y   = 12;
-  const int NUM_CW  = 18;
-  const int T_REDGE = 54;
-  const int LBL_X   = 55;
-  const int SP_X    = 74;
+  bool heaterActive = outputOn && !stopLatched;
 
-  display.setTextSize(3);
-  String tempStr = String((int)round(currentTemp));
-  int tempX = T_REDGE - (int)tempStr.length() * NUM_CW;
-  if (tempX < 0) tempX = 0;
-  display.setCursor(tempX, NUM_Y);
-  display.print(tempStr);
-
-  if (manualOverride) {
-    display.setTextSize(1);
-    display.setCursor(LBL_X, LBL_Y);
-    display.print(outputOn ? "ON" : "OFF");
+  if (now < modeOverlayUntil) {
+    display.setRotation(0);
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    const char* modeNames[] = { "MANUAL", "BANG-BANG", "AUTO RAMP" };
+    uint8_t len = strlen(modeNames[selectedMode]);
+    display.setCursor(max(0, (128 - (int)len * 12) / 2), 8);
+    display.print(modeNames[selectedMode]);
+    display.display();
+    return;
   }
 
+  if (stopLatched) {
+    display.invertDisplay(true);
+  } else {
+    display.invertDisplay(false);
+  }
+
+  display.setRotation(3);
+  if (heaterActive) {
+    display.fillRect(0, 0, 32, 14, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  display.setTextSize(1);
+  const char* modeLabel[] = { "MAN", "BANG", "RAMP" };
+  display.setCursor(4, 3);
+  display.print(modeLabel[selectedMode]);
+
+  display.setRotation(0);
+  display.setTextColor(SSD1306_WHITE);
   display.setTextSize(3);
-  display.setCursor(SP_X, NUM_Y);
-  display.print((int)round(setpoint));
+  String tempStr = String((int)round(currentTemp));
+  int tempX = 16 + max(0, (66 - (int)tempStr.length() * 18));
+  display.setCursor(tempX, 4);
+  display.print(tempStr);
+
+  display.setTextSize(2);
+  String spStr = String((int)round(setpoint));
+  int spX = 128 - (int)spStr.length() * 12;
+  display.setCursor(spX, 16);
+  display.print(spStr);
+
+  display.setTextSize(1);
+  const char* substate = "OFF";
+  if (modeRunning) {
+    if (selectedMode == MODE_MANUAL) {
+      substate = outputOn ? "ON" : "OFF";
+    } else if (selectedMode == MODE_BANG_BANG) {
+      substate = outputOn ? "ON" : "OFF";
+    } else {
+      const char* rampLabels[] = { "IDLE","HEAT","COAST","SOAK","OVR","FSOAK","DONE" };
+      substate = rampLabels[constrain((int)rampState, 0, 6)];
+    }
+  }
+  int ssX = 128 - (int)strlen(substate) * 6;
+  display.setCursor(ssX, 8);
+  display.print(substate);
 
   display.display();
 }
@@ -605,41 +643,110 @@ void updateDisplay() {
 // ─── Button handling ──────────────────────────────────────────────────────────
 void updateButtons() {
   unsigned long now = millis();
+
+  auto registerPress = [&]() {
+    if (now - estopWindowStart > ESTOP_WINDOW_MS) {
+      estopPressCount  = 1;
+      estopWindowStart = now;
+    } else {
+      estopPressCount++;
+    }
+    if (estopPressCount >= ESTOP_PRESSES) {
+      estopPressCount = 0;
+      if (stopLatched) {
+        stopLatched = false;
+        DBGLN("E-stop released");
+      } else {
+        stopLatched  = true;
+        modeRunning  = false;
+        applyHeater(false);
+        DBGLN("E-stop LATCHED");
+      }
+    }
+  };
+
   for (int i = 0; i < 3; i++) {
     bool low = !digitalRead(btns[i].pin);
     switch (btns[i].phase) {
+
       case BTN_IDLE:
         if (low) { btns[i].phase = BTN_PENDING; btns[i].pendingSince = now; }
         break;
+
       case BTN_PENDING:
         if (!low) {
           btns[i].phase = BTN_IDLE;
+          registerPress();
+          if (i == 2 && !stopLatched) {
+            if (modeRunning) {
+              modeRunning = false;
+              applyHeater(false);
+              runActive   = false;
+              closeRunLog();
+              DBGLN("Mode stopped");
+            } else {
+              modeRunning = true;
+              if (selectedMode == MODE_AUTO_RAMP) {
+                rampState        = RS_IDLE;
+                rampStep         = 0;
+                rampOvershootAmt = 0.0f;
+                learnedCount     = 0;
+                finalSoakStartMs = 0;
+                resetStabilityBuf();
+                coastingDropCount = 0;
+                memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+                memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+                memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+                memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+                runActive  = true;
+                runStartMs = now;
+                cacheHead  = 0;
+                cacheCount = 0;
+                openRunLog();
+              } else if (selectedMode == MODE_BANG_BANG) {
+                runActive  = true;
+                runStartMs = now;
+                cacheHead  = 0;
+                cacheCount = 0;
+                openRunLog();
+              }
+              DBGLN("Mode started");
+            }
+          }
         } else if (now - btns[i].pendingSince >= DEBOUNCE_MS) {
-          btns[i].phase           = BTN_HELD;
+          btns[i].phase    = BTN_HELD;
+          btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
-          btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
           if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); prefsDirty = true; prefsDirtyMs = now; }
           if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); prefsDirty = true; prefsDirtyMs = now; }
         }
         break;
+
       case BTN_HELD:
         if (!low) {
-          btns[i].phase           = BTN_IDLE;
+          btns[i].phase = BTN_IDLE;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
           if (prefsDirty) { savePrefs(); prefsDirty = false; }
         } else if (i == 2 && now >= btns[i].nextFire) {
           btns[i].nextFire = ULONG_MAX;
-          if (!manualOverride) {
-            manualOverride = true; outputOn = true; MOSFET_WRITE(true);
-            DBGLN("Manual ON");
-          } else if (outputOn) {
-            outputOn = false; MOSFET_WRITE(false);
-            DBGLN("Manual OFF");
-          } else {
-            manualOverride = false;
-            DBGLN("Auto mode");
+          modeRunning = false;
+          applyHeater(false);
+          runActive = false;
+          closeRunLog();
+          selectedMode = (RunMode)((selectedMode + 1) % 3);
+          modeOverlayUntil = now + MODE_OVERLAY_MS;
+          DBG("Mode selected: "); DBGLN(selectedMode);
+        }
+        if (i != 2) {
+          if (now >= btns[i].nextFire) {
+            if (i == 0) setpoint = min(setpoint + btns[i].currentStep, 1200.0f);
+            if (i == 1) setpoint = max(setpoint - btns[i].currentStep,    0.0f);
+            btns[i].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[i].currentInterval * RAMP_ACCEL);
+            btns[i].currentStep     = min(SP_STEP_MAX, btns[i].currentStep * SP_STEP_ACCEL);
+            btns[i].nextFire        = now + (unsigned long)btns[i].currentInterval;
+            prefsDirty = true; prefsDirtyMs = now;
           }
         }
         break;
@@ -684,9 +791,8 @@ float medianOf(float* arr, uint8_t n) {
 
 // ─── Bang-bang control ────────────────────────────────────────────────────────
 void controlLoop() {
-  if      (currentTemp < setpoint - hysteresis) outputOn = true;
-  else if (currentTemp > setpoint + hysteresis) outputOn = false;
-  MOSFET_WRITE(outputOn);
+  if      (currentTemp < setpoint - hysteresis) applyHeater(true);
+  else if (currentTemp > setpoint + hysteresis) applyHeater(false);
 }
 
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
@@ -708,8 +814,7 @@ void rampControlLoop() {
       rampFireStartTemp  = currentTemp;
       resetStabilityBuf();
       coastingDropCount  = 0;
-      outputOn = true;
-      MOSFET_WRITE(true);
+      applyHeater(true);
       DBGLN("Ramp: HEATING step 0");
       return;
 
@@ -719,8 +824,7 @@ void rampControlLoop() {
         float ratio = effectiveCoastRatio(stepTarget);
         float predictedPeak = currentTemp + rise * ratio;
         if (predictedPeak >= stepTarget) {
-          outputOn = false;
-          MOSFET_WRITE(false);
+          applyHeater(false);
           rampCutoffTemp = currentTemp;
           rampPeakTemp   = currentTemp;
           rampState      = RS_COASTING;
@@ -733,8 +837,7 @@ void rampControlLoop() {
       }
 
       if (currentTemp >= stepTarget) {
-        outputOn = false;
-        MOSFET_WRITE(false);
+        applyHeater(false);
         rampCutoffTemp = currentTemp;
         rampPeakTemp   = currentTemp;
         rampOvershootAmt = 0.0f;
@@ -795,8 +898,8 @@ void rampControlLoop() {
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT: {
-      if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
-      if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
+      if (currentTemp < stepTarget - 3.0f) { applyHeater(true);  }
+      if (currentTemp > stepTarget + 3.0f) { applyHeater(false); }
 
       if (rampState == RS_OVERSHOOT_WAIT) {
         if (currentTemp <= stepTarget + 5.0f && isStable()) {
@@ -813,8 +916,7 @@ void rampControlLoop() {
             rampStateEnteredMs = millis();
             resetStabilityBuf();
             coastingDropCount = 0;
-            outputOn = true;
-            MOSFET_WRITE(true);
+            applyHeater(true);
             DBG("Ramp: HEATING step "); DBGLN(rampStep);
           }
         }
@@ -833,8 +935,7 @@ void rampControlLoop() {
             rampStateEnteredMs = millis();
             resetStabilityBuf();
             coastingDropCount = 0;
-            outputOn = true;
-            MOSFET_WRITE(true);
+            applyHeater(true);
             DBG("Ramp: HEATING step "); DBGLN(rampStep);
           }
         }
@@ -843,17 +944,16 @@ void rampControlLoop() {
     }
 
     case RS_FINAL_SOAK: {
-      if (currentTemp < stepTarget - 3.0f) { outputOn = true;  MOSFET_WRITE(true);  }
-      if (currentTemp > stepTarget + 3.0f) { outputOn = false; MOSFET_WRITE(false); }
+      if (currentTemp < stepTarget - 3.0f) { applyHeater(true);  }
+      if (currentTemp > stepTarget + 3.0f) { applyHeater(false); }
 
       if ((millis() - finalSoakStartMs) >= (unsigned long)(activeProfile.soakMinutes * 60000.0f)) {
-        outputOn = false;
-        MOSFET_WRITE(false);
+        applyHeater(false);
         activeProfile.complete = true;
         savePrefs();
         rampState  = RS_DONE;
         runActive  = false;
-        manualOverride = true;
+        modeRunning = false;
         rampStateEnteredMs = millis();
         closeRunLog();
         DBGLN("Ramp: DONE");
@@ -863,8 +963,7 @@ void rampControlLoop() {
     }
 
     case RS_DONE:
-      outputOn = false;
-      MOSFET_WRITE(false);
+      applyHeater(false);
       break;
   }
 }
@@ -1006,9 +1105,10 @@ void setupRoutes() {
     String j = "{\"temp\":"         + String(currentTemp,  1)
              + ",\"setpoint\":"     + String(setpoint,      1)
              + ",\"output\":"       + String(outputOn ? 1 : 0)
-             + ",\"manual\":"       + String(manualOverride ? 1 : 0)
+             + ",\"selectedMode\":" + String((int)selectedMode)
+             + ",\"modeRunning\":"  + String(modeRunning ? 1 : 0)
+             + ",\"stopLatched\":"  + String(stopLatched ? 1 : 0)
              + ",\"runActive\":"    + String(runActive ? 1 : 0)
-             + ",\"runMode\":"      + String((int)runMode)
              + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
              + ",\"hysteresis\":"   + String(hysteresis,    1)
              + ",\"offset\":"       + String(probeOffset,   1)
@@ -1226,15 +1326,17 @@ void setupRoutes() {
     String actionStr = server.arg("action");
 
     if (actionStr == "start") {
-      runMode   = (modeStr == "autoramp") ? MODE_AUTO_RAMP : MODE_BANG_BANG;
-      runActive = true;
+      if (stopLatched) { server.send(403, "text/plain", "E-stop latched"); return; }
+      selectedMode = (modeStr == "autoramp") ? MODE_AUTO_RAMP
+                   : (modeStr == "manual")   ? MODE_MANUAL
+                   :                           MODE_BANG_BANG;
+      modeRunning  = true;
+      runActive    = true;
       runStartMs = millis();
       cacheHead  = 0;
       cacheCount = 0;
-      manualOverride = false;
       openRunLog();
-      // Stage 2: Reset ramp state for a fresh run if Auto Ramp is selected
-      if (runMode == MODE_AUTO_RAMP) {
+      if (selectedMode == MODE_AUTO_RAMP) {
         rampState         = RS_IDLE;
         rampStep          = 0;
         rampOvershootAmt  = 0.0f;
@@ -1242,7 +1344,6 @@ void setupRoutes() {
         finalSoakStartMs  = 0;
         resetStabilityBuf();
         coastingDropCount = 0;
-        // Clear learned arrays
         memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
         memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
         memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
@@ -1250,10 +1351,9 @@ void setupRoutes() {
       }
       DBGLN("Run started mode=" + modeStr);
     } else if (actionStr == "stop") {
-      runActive      = false;
-      manualOverride = true;
-      outputOn       = false;
-      MOSFET_WRITE(false);
+      modeRunning = false;
+      runActive   = false;
+      applyHeater(false);
       closeRunLog();
       DBGLN("Run stopped");
     } else {
@@ -1420,18 +1520,31 @@ void setupRoutes() {
     }
   });
 
-  server.on("/output", HTTP_POST, []() {
+  server.on("/stop", HTTP_POST, []() {
     if (!requireAuth()) return;
-    String mode = server.arg("mode");
-    if (mode == "on") {
-      manualOverride = true; outputOn = true;  MOSFET_WRITE(true);
-    } else if (mode == "off") {
-      manualOverride = true; outputOn = false; MOSFET_WRITE(false);
-    } else if (mode == "auto") {
-      manualOverride = false;
+    String action = server.arg("action");
+    if (action == "latch") {
+      stopLatched = true;
+      modeRunning = false;
+      runActive   = false;
+      applyHeater(false);
+      closeRunLog();
+    } else if (action == "release") {
+      stopLatched = false;
     } else {
-      server.send(400, "text/plain", "mode must be on, off, or auto"); return;
+      server.send(400, "text/plain", "action must be latch or release"); return;
     }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/manual", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (stopLatched)              { server.send(403, "text/plain", "E-stop latched"); return; }
+    if (selectedMode != MODE_MANUAL) { server.send(400, "text/plain", "Not in manual mode"); return; }
+    String action = server.arg("action");
+    if      (action == "on")  applyHeater(true);
+    else if (action == "off") applyHeater(false);
+    else { server.send(400, "text/plain", "action must be on or off"); return; }
     server.send(200, "text/plain", "OK");
   });
 

@@ -25,6 +25,13 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 </head>
 <body>
 
+<div class="card" id="stopPanel">
+  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+    <button id="btnStop" onclick="toggleStop()" style="background:#e74c3c;">&#x26A0; STOP</button>
+    <span id="stopStatus" style="font-size:.9rem;color:#aaa;">Normal operation</span>
+  </div>
+</div>
+
 <div class="card">
   <h2>&#x1F321; Live Temperature</h2>
   <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
@@ -34,10 +41,9 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
     <div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
   </div>
-  <div style="margin-top:.8rem;display:flex;gap:.5rem;flex-wrap:wrap;">
-    <button onclick="setOutput('on')">Manual ON</button>
-    <button onclick="setOutput('off')" style="background:#555;">Manual OFF</button>
-    <button onclick="setOutput('auto')" style="background:#2980b9;">Auto</button>
+  <div id="manualControls" style="margin-top:.8rem;display:none;gap:.5rem;flex-wrap:wrap;">
+    <button onclick="setManual('on')">Manual ON</button>
+    <button onclick="setManual('off')" style="background:#555;">Manual OFF</button>
   </div>
 </div>
 
@@ -47,13 +53,14 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <div style="flex:1;min-width:140px;">
       <label style="margin-bottom:.3rem;">Mode
         <select id="runModeSelect">
+          <option value="manual">Manual (On/Off)</option>
           <option value="bangbang">Bang-Bang</option>
-          <option value="autoramp">Auto-Ramp (Stage 2)</option>
+          <option value="autoramp">Auto-Ramp</option>
         </select>
       </label>
     </div>
-    <button onclick="startRun()" style="background:#2ecc71;color:#111;">&#x25B6; Start Run</button>
-    <button onclick="stopRun()"  style="background:#e74c3c;">&#x25A0; Stop Run</button>
+    <button onclick="startRun()" style="background:#2ecc71;color:#111;">&#x25B6; Start</button>
+    <button onclick="stopRun()"  style="background:#e74c3c;">&#x25A0; Stop</button>
   </div>
   <div id="runStatus" style="margin-top:.5rem;font-size:.9rem;color:#aaa;">No run active.</div>
 </div>
@@ -628,6 +635,7 @@ async function showRunSummary(learnedSteps, stepTargets) {
 
 let currentSetpoint = 500;
 let wasRunActive = false;
+let wasSelectedMode = 0;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
 
 async function poll() {
@@ -640,33 +648,62 @@ async function poll() {
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
     document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
     const outEl = document.getElementById('out');
-    if (st.manual) {
-      outEl.textContent = st.output ? 'MANUAL ON' : 'MANUAL OFF';
+    const modeNames = ['MANUAL', 'BANG-BANG', 'AUTO RAMP'];
+    if (st.stopLatched) {
+      outEl.textContent = 'E-STOP';
+      outEl.className   = 'badge off';
+    } else if (st.selectedMode === 0) {
+      outEl.textContent = st.output ? 'ON' : 'OFF';
+      outEl.className   = 'badge ' + (st.output ? 'on' : 'off');
+    } else if (st.modeRunning) {
+      outEl.textContent = st.output ? 'ON' : 'OFF';
       outEl.className   = 'badge ' + (st.output ? 'on' : 'off');
     } else {
-      outEl.textContent = st.output ? 'AUTO ON' : 'AUTO OFF';
-      outEl.className   = 'badge auto';
+      outEl.textContent = 'IDLE';
+      outEl.className   = 'badge off';
     }
     currentSetpoint = st.setpoint;
+
+    // E-stop panel
+    const stopBtn = document.getElementById('btnStop');
+    const stopStatus = document.getElementById('stopStatus');
+    if (st.stopLatched) {
+      stopBtn.textContent = '\u21BA RELEASE STOP';
+      stopBtn.style.background = '#f39c12';
+      stopStatus.textContent = 'E-STOP LATCHED - heater disabled';
+      stopStatus.style.color = '#e74c3c';
+    } else {
+      stopBtn.textContent = '\u26A0 STOP';
+      stopBtn.style.background = '#e74c3c';
+      stopStatus.textContent = 'Normal operation';
+      stopStatus.style.color = '#aaa';
+    }
+
+    // Manual mode controls visibility
+    const manualControls = document.getElementById('manualControls');
+    manualControls.style.display = (st.selectedMode === 0 && !st.stopLatched) ? 'flex' : 'none';
+
+    // Mode selector
+    const modeValues = ['manual', 'bangbang', 'autoramp'];
+    document.getElementById('runModeSelect').value = modeValues[st.selectedMode] || 'bangbang';
 
     // Run status line
     const rsEl = document.getElementById('runStatus');
     if (st.runActive) {
-      const mLabel = st.runMode === 1 ? 'Auto-Ramp' : 'Bang-Bang';
+      const mLabel = modeNames[st.selectedMode];
       const elapsed = st.runElapsed || 0;
       const m = Math.floor(elapsed/60), s = elapsed%60;
-      rsEl.textContent = '\u25CF Running \u2022 Mode: ' + mLabel +
+      rsEl.textContent = '\u25CF Running \u2022 ' + mLabel +
         ' \u2022 Elapsed: ' + m + ':' + String(s).padStart(2,'0');
       rsEl.style.color = '#2ecc71';
 
-      const isRamp = st.runMode === 1;
+      const isRamp = st.selectedMode === 2;
       document.getElementById('rampPanel').style.display       = isRamp ? 'block' : 'none';
       document.getElementById('profilePanel').style.display    = isRamp ? 'block' : 'none';
       document.getElementById('profileLibPanel').style.display = isRamp ? 'block' : 'none';
-      document.getElementById('runModeSelect').value = isRamp ? 'autoramp' : 'bangbang';
     } else {
-      if (wasRunActive && !st.runActive) {
-        const wasRamp = (document.getElementById('runModeSelect').value === 'autoramp');
+      if (wasRunActive) {
+        const wasRamp = wasSelectedMode === 2;
         rsEl.textContent = wasRamp
           ? '\u2705 Auto-Ramp run complete.'
           : '\u25A0 Run stopped.';
@@ -684,6 +721,7 @@ async function poll() {
       }
     }
     wasRunActive = st.runActive;
+    wasSelectedMode = st.selectedMode;
 
     if (st.cjcC   !== undefined) document.getElementById('cjcC').textContent    = st.cjcC.toFixed(1);
     if (st.shuntMV!== undefined) document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
@@ -713,10 +751,8 @@ async function poll() {
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
     }
-    // Sync log if run active
     if (st.runActive) syncLog();
-    // Ramp status polling (Stage 2) - only in autoramp mode when run is active
-    if (st.runActive && document.getElementById('runModeSelect').value === 'autoramp') {
+    if (st.runActive && st.selectedMode === 2) {
       pollRamp();
     }
   } catch(e) { console.warn('poll error', e); }
@@ -862,11 +898,22 @@ async function changeAuth() {
   }
 }
 
-function setOutput(mode) {
-  fetch('/output', {method:'POST', body: new URLSearchParams({mode})})
+async function toggleStop() {
+  try {
+    const resp = await fetch('/status').then(r => r.json());
+    const action = resp.stopLatched ? 'release' : 'latch';
+    await fetch('/stop', {method:'POST', body: new URLSearchParams({action})});
+    poll();
+  } catch(e) {
+    console.warn('stop error', e);
+  }
+}
+
+function setManual(action) {
+  fetch('/manual', {method:'POST', body: new URLSearchParams({action})})
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); })
     .then(() => poll())
-    .catch(e => console.warn('output error', e));
+    .catch(e => console.warn('manual error', e));
 }
 
 function updateCalMode(val) {
