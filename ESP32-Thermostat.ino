@@ -31,9 +31,9 @@ const uint8_t PIN_BTN_UP  =  6;
 const uint8_t PIN_BTN_DN  =  4;
 const uint8_t PIN_BTN_CTR =  5;
 
-// outputOn=true  -> PIN_MOSFET LOW  (active-low load)
-// outputOn=false -> PIN_MOSFET HIGH
-#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? LOW : HIGH)
+// outputOn=true  -> PIN_MOSFET HIGH (active-high relay module)
+// outputOn=false -> PIN_MOSFET LOW
+#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? HIGH : LOW)
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
@@ -678,7 +678,7 @@ void updateButtons() {
       case BTN_PENDING:
         if (!low) {
           btns[i].phase = BTN_IDLE;
-          registerPress();
+          if (i == 2) registerPress();
           if (i == 2 && !stopLatched) {
             if (modeRunning) {
               modeRunning = false;
@@ -715,7 +715,7 @@ void updateButtons() {
               DBGLN("Mode started");
             }
           }
-        } else if (now - btns[i].pendingSince >= DEBOUNCE_MS) {
+        } else if (now - btns[i].pendingSince >= (i == 2 ? RAMP_DELAY_MS : DEBOUNCE_MS)) {
           btns[i].phase    = BTN_HELD;
           btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
