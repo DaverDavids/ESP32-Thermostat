@@ -31,9 +31,9 @@ const uint8_t PIN_BTN_UP  =  6;
 const uint8_t PIN_BTN_DN  =  4;
 const uint8_t PIN_BTN_CTR =  5;
 
-// outputOn=true  -> PIN_MOSFET HIGH (active-high relay module)
-// outputOn=false -> PIN_MOSFET LOW
-#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? HIGH : LOW)
+// outputOn=true  -> PIN_MOSFET LOW  (active-low load)
+// outputOn=false -> PIN_MOSFET HIGH
+#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? LOW : HIGH)
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
