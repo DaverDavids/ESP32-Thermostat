@@ -922,6 +922,134 @@ function updateCalMode(val) {
   if (el) el.style.display = (val == '2') ? 'block' : 'none';
 }
 </script>
+
+<!-- ── GPIO / Pin Debug Panel ─────────────────────────────────────── -->
+<div class="card" id="pinDebugPanel">
+  <h2 style="cursor:pointer;user-select:none;" onclick="togglePinPanel()">
+    &#x1F527; GPIO Pin State
+    <span id="pinPanelToggle" style="font-size:.75rem;color:#aaa;margin-left:.5rem;">[collapse]</span>
+  </h2>
+  <div id="pinPanelBody">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.5rem;margin-bottom:.75rem;">
+
+      <!-- Input pins -->
+      <div class="pin-cell" id="pc-btnUp">
+        <div class="pin-label">BTN UP &nbsp;<span class="pin-num">GPIO6</span></div>
+        <div class="pin-val" id="pv-btnUp">--</div>
+        <div class="pin-phase" id="pp-btnUp">--</div>
+      </div>
+      <div class="pin-cell" id="pc-btnDn">
+        <div class="pin-label">BTN DN &nbsp;<span class="pin-num">GPIO4</span></div>
+        <div class="pin-val" id="pv-btnDn">--</div>
+        <div class="pin-phase" id="pp-btnDn">--</div>
+      </div>
+      <div class="pin-cell" id="pc-btnCtr">
+        <div class="pin-label">BTN CTR &nbsp;<span class="pin-num">GPIO5</span></div>
+        <div class="pin-val" id="pv-btnCtr">--</div>
+        <div class="pin-phase" id="pp-btnCtr">--</div>
+      </div>
+
+      <!-- Output pin -->
+      <div class="pin-cell" id="pc-mosfet">
+        <div class="pin-label">MOSFET &nbsp;<span class="pin-num">GPIO3</span></div>
+        <div class="pin-val" id="pv-mosfet">--</div>
+        <div class="pin-phase" id="pp-mosfet" style="font-size:.7rem;color:#aaa;">OUTPUT</div>
+      </div>
+
+      <!-- I2C (info only, not read) -->
+      <div class="pin-cell" style="opacity:.55;">
+        <div class="pin-label">I2C SDA &nbsp;<span class="pin-num">GPIO8</span></div>
+        <div class="pin-val" style="color:#555;">I2C</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED/INA219</div>
+      </div>
+      <div class="pin-cell" style="opacity:.55;">
+        <div class="pin-label">I2C SCL &nbsp;<span class="pin-num">GPIO9</span></div>
+        <div class="pin-val" style="color:#555;">I2C</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED/INA219</div>
+      </div>
+    </div>
+
+    <!-- State flags row -->
+    <div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem;">
+      <span class="badge" id="flag-outputOn">outputOn: --</span>
+      <span class="badge" id="flag-stop">stopLatched: --</span>
+      <span class="badge" id="flag-mode">modeRunning: --</span>
+      <span class="badge" id="flag-estop" style="background:#555;">E-stop count: --</span>
+    </div>
+    <div style="font-size:.75rem;color:#555;margin-top:.25rem;">
+      Polls /pinstatus every 200 ms &nbsp;&#x2022;&nbsp; Buttons are INPUT_PULLUP (LOW = pressed)
+    </div>
+  </div>
+</div>
+
+<style>
+  .pin-cell{background:#0f3460;border-radius:6px;padding:.5rem .65rem;border:1px solid #1a1a3e;}
+  .pin-cell.pressed{border-color:#e94560;background:#2a1030;}
+  .pin-cell.active{border-color:#2ecc71;background:#0a2510;}
+  .pin-label{font-size:.72rem;color:#aaa;margin-bottom:.15rem;}
+  .pin-num{font-size:.65rem;color:#555;}
+  .pin-val{font-size:1.35rem;font-weight:bold;line-height:1.1;}
+  .pin-phase{font-size:.72rem;color:#aaa;margin-top:.1rem;}
+</style>
+
+<script>
+(function(){
+  let pinPanelOpen = true;
+
+  window.togglePinPanel = function() {
+    pinPanelOpen = !pinPanelOpen;
+    document.getElementById('pinPanelBody').style.display = pinPanelOpen ? '' : 'none';
+    document.getElementById('pinPanelToggle').textContent = pinPanelOpen ? '[collapse]' : '[expand]';
+  };
+
+  function setPinCell(id, isActive, valText, phaseText, activeClass) {
+    const cell  = document.getElementById('pc-' + id);
+    const val   = document.getElementById('pv-' + id);
+    const phase = document.getElementById('pp-' + id);
+    if (!cell) return;
+    cell.className = 'pin-cell ' + (isActive ? activeClass : '');
+    val.textContent   = valText;
+    val.style.color   = isActive ? (activeClass === 'pressed' ? '#e94560' : '#2ecc71') : '#555';
+    if (phase && phaseText !== undefined) phase.textContent = phaseText;
+  }
+
+  async function pollPins() {
+    try {
+      const p = await fetch('/pinstatus').then(r => r.json());
+
+      // Buttons (INPUT_PULLUP: pressed = true)
+      setPinCell('btnUp',  p.btnUp,  p.btnUp  ? 'PRESSED' : 'OPEN', p.btnUpPhase,  'pressed');
+      setPinCell('btnDn',  p.btnDn,  p.btnDn  ? 'PRESSED' : 'OPEN', p.btnDnPhase,  'pressed');
+      setPinCell('btnCtr', p.btnCtr, p.btnCtr ? 'PRESSED' : 'OPEN', p.btnCtrPhase, 'pressed');
+
+      // MOSFET output
+      setPinCell('mosfet', p.outputOn, p.outputOn ? 'HIGH / ON' : 'LOW / OFF', 'OUTPUT', 'active');
+
+      // Flags
+      const fOut  = document.getElementById('flag-outputOn');
+      const fStop = document.getElementById('flag-stop');
+      const fMode = document.getElementById('flag-mode');
+      const fEs   = document.getElementById('flag-estop');
+
+      fOut.textContent  = 'outputOn: ' + (p.outputOn ? 'YES' : 'NO');
+      fOut.className    = 'badge ' + (p.outputOn  ? 'on' : 'off');
+
+      fStop.textContent = 'E-STOP: '   + (p.stopLatched ? 'LATCHED' : 'clear');
+      fStop.className   = 'badge '     + (p.stopLatched ? 'off' : 'on');
+
+      fMode.textContent = 'running: '  + (p.modeRunning ? 'YES' : 'NO');
+      fMode.className   = 'badge '     + (p.modeRunning ? 'auto' : 'off');
+
+      fEs.textContent   = 'E-stop presses: ' + p.estopCount + '/3';
+      fEs.style.background = p.estopCount > 0 ? '#e67e22' : '#555';
+
+    } catch(e) { /* device unreachable during reboot */ }
+  }
+
+  setInterval(pollPins, 200);
+  pollPins();
+})();
+</script>
 </body>
 </html>
 )rawhtml";

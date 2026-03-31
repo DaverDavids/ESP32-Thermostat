@@ -678,41 +678,48 @@ void updateButtons() {
       case BTN_PENDING:
         if (!low) {
           btns[i].phase = BTN_IDLE;
-          if (i == 2) registerPress();
-          if (i == 2 && !stopLatched) {
-            if (modeRunning) {
-              modeRunning = false;
-              applyHeater(false);
-              runActive   = false;
-              closeRunLog();
-              DBGLN("Mode stopped");
+          if (i == 2) {
+            if (stopLatched) {
+              registerPress();
             } else {
-              modeRunning = true;
-              if (selectedMode == MODE_AUTO_RAMP) {
-                rampState        = RS_IDLE;
-                rampStep         = 0;
-                rampOvershootAmt = 0.0f;
-                learnedCount     = 0;
-                finalSoakStartMs = 0;
-                resetStabilityBuf();
-                coastingDropCount = 0;
-                memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
-                memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
-                memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
-                memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
-                runActive  = true;
-                runStartMs = now;
-                cacheHead  = 0;
-                cacheCount = 0;
-                openRunLog();
-              } else if (selectedMode == MODE_BANG_BANG) {
-                runActive  = true;
-                runStartMs = now;
-                cacheHead  = 0;
-                cacheCount = 0;
-                openRunLog();
+              bool handled = false;
+              if (modeRunning) {
+                modeRunning = false;
+                applyHeater(false);
+                runActive   = false;
+                closeRunLog();
+                DBGLN("Mode stopped");
+                handled = true;
+              } else {
+                modeRunning = true;
+                if (selectedMode == MODE_AUTO_RAMP) {
+                  rampState        = RS_IDLE;
+                  rampStep         = 0;
+                  rampOvershootAmt = 0.0f;
+                  learnedCount     = 0;
+                  finalSoakStartMs = 0;
+                  resetStabilityBuf();
+                  coastingDropCount = 0;
+                  memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+                  memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+                  memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+                  memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+                  runActive  = true;
+                  runStartMs = now;
+                  cacheHead  = 0;
+                  cacheCount = 0;
+                  openRunLog();
+                } else if (selectedMode == MODE_BANG_BANG) {
+                  runActive  = true;
+                  runStartMs = now;
+                  cacheHead  = 0;
+                  cacheCount = 0;
+                  openRunLog();
+                }
+                DBGLN("Mode started");
+                handled = true;
               }
-              DBGLN("Mode started");
+              if (!handled) registerPress();
             }
           }
         } else if (now - btns[i].pendingSince >= (i == 2 ? RAMP_DELAY_MS : DEBOUNCE_MS)) {
@@ -1135,6 +1142,36 @@ void setupRoutes() {
              + ",\"calTemp2\":"     + String(calTemp2,      1)
              + ",\"calCjc2\":"      + String(calCjc2,       2)
              + "}";
+    server.send(200, "application/json", j);
+  });
+
+  // ── Pin/GPIO debug status ─────────────────────────────────────────────────
+  server.on("/pinstatus", HTTP_GET, []() {
+    bool btnUp  = !digitalRead(PIN_BTN_UP);
+    bool btnDn  = !digitalRead(PIN_BTN_DN);
+    bool btnCtr = !digitalRead(PIN_BTN_CTR);
+    bool mosfetPin = digitalRead(PIN_MOSFET);
+    const char* phaseNames[] = {"IDLE","PENDING","HELD"};
+    String j = String("{")
+      + "\"btnUp\":"         + String(btnUp    ? 1 : 0)
+      + ",\"btnDn\":"        + String(btnDn    ? 1 : 0)
+      + ",\"btnCtr\":"       + String(btnCtr   ? 1 : 0)
+      + ",\"mosfet\":"       + String(mosfetPin? 1 : 0)
+      + ",\"outputOn\":"     + String(outputOn     ? 1 : 0)
+      + ",\"stopLatched\":"  + String(stopLatched  ? 1 : 0)
+      + ",\"modeRunning\":"  + String(modeRunning  ? 1 : 0)
+      + ",\"heatRequested\":" + String(heatRequested ? 1 : 0)
+      + ",\"btnUpPhase\":\""  + phaseNames[btns[0].phase] + "\""
+      + ",\"btnDnPhase\":\""  + phaseNames[btns[1].phase] + "\""
+      + ",\"btnCtrPhase\":\"" + phaseNames[btns[2].phase] + "\""
+      + ",\"estopCount\":"   + String(estopPressCount)
+      + ",\"pinMosfet\":"    + String(PIN_MOSFET)
+      + ",\"pinBtnUp\":"     + String(PIN_BTN_UP)
+      + ",\"pinBtnDn\":"     + String(PIN_BTN_DN)
+      + ",\"pinBtnCtr\":"    + String(PIN_BTN_CTR)
+      + ",\"pinSDA\":"       + String(PIN_SDA)
+      + ",\"pinSCL\":"       + String(PIN_SCL)
+      + "}";
     server.send(200, "application/json", j);
   });
 
