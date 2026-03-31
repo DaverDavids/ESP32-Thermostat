@@ -33,7 +33,7 @@ const uint8_t PIN_BTN_CTR =  5;
 
 // outputOn=true  -> PIN_MOSFET LOW  (active-low load)
 // outputOn=false -> PIN_MOSFET HIGH
-#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? LOW : HIGH)
+#define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? HIGH : LOW)
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
 const uint8_t  OLED_W    = 128;
