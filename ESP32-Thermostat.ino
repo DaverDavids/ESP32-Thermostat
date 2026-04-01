@@ -31,8 +31,8 @@ const uint8_t PIN_BTN_UP  =  6;
 const uint8_t PIN_BTN_DN  =  4;
 const uint8_t PIN_BTN_CTR =  5;
 
-// outputOn=true  -> PIN_MOSFET HIGH
-// outputOn=false -> PIN_MOSFET LOW
+// outputOn=true  -> PIN_MOSFET LOW  (active-low load)
+// outputOn=false -> PIN_MOSFET HIGH
 #define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? HIGH : LOW)
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
@@ -62,12 +62,9 @@ float   medBuf[MEDIAN_N];
 uint8_t medCount = 0;
 unsigned long lastFastSample = 0;
 
-// ─── Button timing / debounce ────────────────────────────────────────────────
-const uint32_t DEBOUNCE_MS          =   30;
-const uint32_t BTN_SETTLE_MS        =   10;
-const uint32_t CTR_LONGPRESS_MS     = 2000;
-const uint32_t CTR_ESTOP_WINDOW_MS  = 1000;
-const uint8_t  CTR_ESTOP_PRESSES    =    3;
+// ─── Button debounce / long-press ────────────────────────────────────────────
+const uint32_t DEBOUNCE_MS      =   30;
+const uint32_t CTR_LONGPRESS_MS = 2000;
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  200;
@@ -88,10 +85,10 @@ bool    stopLatched  = false;
 unsigned long modeOverlayUntil = 0;
 #define MODE_OVERLAY_MS 1500
 
-// ─── Center button gesture tracking ──────────────────────────────────────────
 uint8_t  estopPressCount = 0;
 unsigned long estopWindowStart = 0;
-bool centerLongPressHandled = false;
+#define ESTOP_PRESSES   3
+#define ESTOP_WINDOW_MS 1000
 
 // ─── Ramp support (Stage 2) ───────────────────────────────────────────
 #define RAMP_MAX_STEPS 8
@@ -119,6 +116,7 @@ RampProfile activeProfile = {
   false
 };
 
+// RampState machine (Stage 2)
 enum RampState {
   RS_IDLE            = 0,
   RS_HEATING         = 1,
@@ -129,32 +127,39 @@ enum RampState {
   RS_DONE            = 6
 };
 
+// Per-run learned data (arrays accumulate during a run)
+// Indexed by step number (0 to stepCount-2)
 #define MAX_LEARNED_STEPS (RAMP_MAX_STEPS - 1)
-float learnedFireStartTemp[MAX_LEARNED_STEPS];
-float learnedCutoffTemp[MAX_LEARNED_STEPS];
-float learnedPeakTemp[MAX_LEARNED_STEPS];
-float learnedCoastRatio[MAX_LEARNED_STEPS];
-uint8_t learnedCount = 0;
 
+float learnedFireStartTemp[MAX_LEARNED_STEPS];  // probe temp when element turned ON
+float learnedCutoffTemp[MAX_LEARNED_STEPS];     // probe temp when element turned OFF
+float learnedPeakTemp[MAX_LEARNED_STEPS];       // highest probe temp after cutoff
+float learnedCoastRatio[MAX_LEARNED_STEPS];     // (peak-cutoff)/(cutoff-fireStart)
+uint8_t learnedCount = 0;                       // how many steps have full data
+
+// Ramp working variables
 RampState rampState    = RS_IDLE;
-uint8_t   rampStep     = 0;
+uint8_t   rampStep     = 0;        // current step index into activeProfile.stepTargets
 float     rampFireStartTemp = 0.0f;
 float     rampCutoffTemp    = 0.0f;
-float     rampPeakTemp      = 0.0f;
-float     rampOvershootAmt  = 0.0f;
-unsigned long rampStateEnteredMs = 0;
+float     rampPeakTemp      = 0.0f;  // tracks max temp seen during COASTING
+float     rampOvershootAmt  = 0.0f;  // °C above step target at peak (0 if none)
+unsigned long rampStateEnteredMs = 0; // millis() when current state began
 unsigned long finalSoakStartMs   = 0;
+// Stability detection: sliding window over last 30s = 60 samples at 2Hz
 #define STABILITY_WINDOW 60
 float stabilityBuf[STABILITY_WINDOW];
 uint16_t stabilityIdx   = 0;
-uint16_t stabilityFilled = 0;
-uint8_t coastingDropCount = 0;
+uint16_t stabilityFilled = 0;  // 0 until buffer has at least STABILITY_WINDOW entries
+uint8_t coastingDropCount = 0;  // consecutive samples below peak threshold
 
+// Helpers (forward declarations)
 float effectiveCoastRatio(float tempC);
 void refitCoastModel();
 bool isStable();
 void resetStabilityBuf();
 
+// ─── Ramp support functions ───────────────────────────────────────────
 float effectiveCoastRatio(float tempC) {
   float r = activeProfile.coastBase - activeProfile.coastSlope * (tempC / 100.0f);
   return max(r, 0.05f);
@@ -171,7 +176,7 @@ void refitCoastModel() {
     sumXY += x * y; sumX2 += x * x;
   }
   float denom = n * sumX2 - sumX * sumX;
-  if (fabsf(denom) < 1e-6f) return;
+  if (fabsf(denom) < 1e-6f) return;  // degenerate
   float slopePerC = (n * sumXY - sumX * sumY) / denom;
   float intercept  = (sumY - slopePerC * sumX) / n;
   activeProfile.coastSlope = -slopePerC * 100.0f;
@@ -256,7 +261,8 @@ bool profileFromJson(const String& json, RampProfile& p) {
   return true;
 }
 
-extern bool spiffsOk;
+extern bool spiffsOk;  // forward ref – defined in globals below
+
 void ensureProfileDir() {
   if (!spiffsOk) return;
   if (!SPIFFS.exists(PROFILE_DIR)) {
@@ -265,20 +271,26 @@ void ensureProfileDir() {
   }
 }
 
+// ─── SPIFFS run log ───────────────────────────────────────────────────────────
+// Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
+// OR bang-bang auto active). Columns:
+//   t_s, tempC, setpoint, output, mode, ramp_state, step_idx, coast_ratio_est
+// ramp_state and step_idx are placeholders (0) until Stage 2.
 static const char* LOG_PATH = "/runlog.csv";
 bool     spiffsOk   = false;
 bool     runActive  = false;
 unsigned long runStartMs = 0;
 File     runLogFile;
 
+// Short RAM cache: 64 most-recent samples for fast /log?since= serving
 #define CACHE_SIZE 64
 struct CacheSample {
   uint32_t t_s;
   float    tC;
   float    sp;
   uint8_t  output;
-  uint8_t  mode;
-  uint8_t  ramp_state;
+  uint8_t  mode;         // RunMode value
+  uint8_t  ramp_state;   // 0 = not ramp (Stage 2 will populate)
   uint8_t  step_idx;
   float    coast_ratio;
 };
@@ -300,6 +312,7 @@ void closeRunLog() {
 
 void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
                   uint8_t mode, uint8_t ramp_state, uint8_t step_idx, float coast_ratio) {
+  // Always update RAM cache
   sampleCache[cacheHead % CACHE_SIZE] = { t_s, tC, sp, output, mode, ramp_state, step_idx, coast_ratio };
   cacheHead++;
   if (cacheCount < CACHE_SIZE) cacheCount++;
@@ -316,6 +329,7 @@ void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
   runLogFile.flush();
 }
 
+// ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
 bool             prefsDirty = false;
 unsigned long    prefsDirtyMs = 0;
@@ -345,6 +359,7 @@ float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
+// ─── Web auth ─────────────────────────────────────────────────────────────────
 String webUser = "admin";
 String webPass = "thermostat";
 
@@ -362,6 +377,7 @@ unsigned long bootTime          = 0;
 bool otaStarted    = false;
 bool serverStarted = false;
 
+// ─── Ramp stability helpers ───────────────────────────────────────────
 bool isStable() {
   stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
   stabilityIdx++;
@@ -380,21 +396,19 @@ void resetStabilityBuf() {
   stabilityFilled = 0;
 }
 
+// ─── Button state ─────────────────────────────────────────────────────────────
 enum BtnPhase { BTN_IDLE, BTN_PENDING, BTN_HELD };
 struct BtnState {
   uint8_t   pin;
   BtnPhase  phase;
-  bool      stablePressed;
-  bool      lastRawPressed;
-  unsigned long lastRawChangeMs;
-  unsigned long pressedAt;
+  unsigned long pendingSince;
   unsigned long nextFire;
   float     currentInterval;
   float     currentStep;
 } btns[3];
 
+// ─── Heater gatekeeper ─────────────────────────────────────────────────────────
 void applyHeater(bool requestOn) {
-  heatRequested = requestOn;
   if (stopLatched || !requestOn) {
     outputOn = false;
     MOSFET_WRITE(false);
@@ -404,6 +418,7 @@ void applyHeater(bool requestOn) {
   }
 }
 
+// ─── Forward declarations ─────────────────────────────────────────────────────
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
@@ -414,12 +429,8 @@ void rampControlLoop();
 void updateButtons(); void updateDisplay();
 void openRunLog();
 void appendRunLog(uint32_t, float, float, uint8_t, uint8_t, uint8_t, uint8_t, float);
-void onUpPress(unsigned long now);
-void onDnPress(unsigned long now);
-void onCenterShortPress(unsigned long now);
-void onCenterLongPress(unsigned long now);
-void registerCenterEstopPress(unsigned long now);
 
+// ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -429,12 +440,8 @@ void setup() {
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
-    btns[i] = { btnPins[i], BTN_IDLE, false, false, 0, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
+    btns[i] = { btnPins[i], BTN_IDLE, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
     pinMode(btnPins[i], INPUT_PULLUP);
-    bool rawPressed = !digitalRead(btnPins[i]);
-    btns[i].stablePressed = rawPressed;
-    btns[i].lastRawPressed = rawPressed;
-    btns[i].lastRawChangeMs = millis();
   }
 
   Wire.begin(PIN_SDA, PIN_SCL);
@@ -454,6 +461,7 @@ void setup() {
     DBGLN("OLED ready");
   }
 
+  // SPIFFS
   spiffsOk = SPIFFS.begin(true);
   if (spiffsOk) { DBGLN("SPIFFS ready"); ensureProfileDir(); }
   else          { DBGLN("SPIFFS failed - logging to RAM cache only"); }
@@ -488,6 +496,7 @@ void setup() {
   DBGLN("Ready");
 }
 
+// ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
   if (apMode) dns.processNextRequest();
   updateButtons();
@@ -510,6 +519,7 @@ void loop() {
     }
     DBG("T: "); DBGLN(currentTemp);
 
+    // history ring buffer (unchanged)
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
@@ -562,6 +572,7 @@ void loop() {
   }
 }
 
+// ─── Display ──────────────────────────────────────────────────────────────────
 void updateDisplay() {
   unsigned long now = millis();
   display.clearDisplay();
@@ -631,173 +642,128 @@ void updateDisplay() {
   display.display();
 }
 
-void onUpPress(unsigned long now) {
-  setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f);
-  prefsDirty = true;
-  prefsDirtyMs = now;
-}
-
-void onDnPress(unsigned long now) {
-  setpoint = max(setpoint - SP_STEP_INITIAL, 0.0f);
-  prefsDirty = true;
-  prefsDirtyMs = now;
-}
-
-void registerCenterEstopPress(unsigned long now) {
-  if (now - estopWindowStart > CTR_ESTOP_WINDOW_MS) {
-    estopPressCount = 1;
-    estopWindowStart = now;
-  } else {
-    estopPressCount++;
-  }
-
-  DBG("Center tap count: "); DBGLN(estopPressCount);
-
-  if (estopPressCount >= CTR_ESTOP_PRESSES) {
-    estopPressCount = 0;
-    estopWindowStart = now;
-    if (stopLatched) {
-      stopLatched = false;
-      DBGLN("E-stop released");
-    } else {
-      stopLatched  = true;
-      modeRunning  = false;
-      runActive    = false;
-      applyHeater(false);
-      closeRunLog();
-      DBGLN("E-stop LATCHED");
-    }
-  }
-}
-
-void onCenterShortPress(unsigned long now) {
-  registerCenterEstopPress(now);
-
-  if (stopLatched) return;
-
-  if (modeRunning) {
-    modeRunning = false;
-    runActive   = false;
-    applyHeater(false);
-    closeRunLog();
-    DBGLN("Mode stopped");
-    return;
-  }
-
-  modeRunning = true;
-  if (selectedMode == MODE_AUTO_RAMP) {
-    rampState         = RS_IDLE;
-    rampStep          = 0;
-    rampOvershootAmt  = 0.0f;
-    learnedCount      = 0;
-    finalSoakStartMs  = 0;
-    resetStabilityBuf();
-    coastingDropCount = 0;
-    memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
-    memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
-    memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
-    memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
-    runActive  = true;
-    runStartMs = now;
-    cacheHead  = 0;
-    cacheCount = 0;
-    openRunLog();
-  } else if (selectedMode == MODE_BANG_BANG) {
-    runActive  = true;
-    runStartMs = now;
-    cacheHead  = 0;
-    cacheCount = 0;
-    openRunLog();
-  }
-  DBGLN("Mode started");
-}
-
-void onCenterLongPress(unsigned long now) {
-  centerLongPressHandled = true;
-  estopPressCount = 0;
-  estopWindowStart = now;
-  modeRunning = false;
-  runActive = false;
-  applyHeater(false);
-  closeRunLog();
-  selectedMode = (RunMode)((selectedMode + 1) % 3);
-  modeOverlayUntil = now + MODE_OVERLAY_MS;
-  DBG("Mode selected: "); DBGLN(selectedMode);
-}
-
+// ─── Button handling ──────────────────────────────────────────────────────────
 void updateButtons() {
   unsigned long now = millis();
 
-  for (int i = 0; i < 3; i++) {
-    BtnState& b = btns[i];
-    bool rawPressed = !digitalRead(b.pin);
-
-    if (rawPressed != b.lastRawPressed) {
-      b.lastRawPressed = rawPressed;
-      b.lastRawChangeMs = now;
-    }
-
-    if ((now - b.lastRawChangeMs) < DEBOUNCE_MS) {
-      continue;
-    }
-
-    if (rawPressed != b.stablePressed) {
-      b.stablePressed = rawPressed;
-
-      if (rawPressed) {
-        b.phase = BTN_PENDING;
-        b.pressedAt = now;
-        b.nextFire = now + RAMP_DELAY_MS;
-        b.currentInterval = RAMP_RATE_INITIAL_MS;
-        b.currentStep = SP_STEP_INITIAL;
-        if (i == 2) centerLongPressHandled = false;
-      } else {
-        unsigned long heldMs = now - b.pressedAt;
-        bool wasHeld = (b.phase == BTN_HELD);
-        b.phase = BTN_IDLE;
-        b.nextFire = 0;
-        b.currentInterval = RAMP_RATE_INITIAL_MS;
-        b.currentStep = SP_STEP_INITIAL;
-
-        if (i == 2) {
-          if (!centerLongPressHandled && heldMs >= BTN_SETTLE_MS) {
-            onCenterShortPress(now);
-          }
-        } else {
-          if (!wasHeld && heldMs >= BTN_SETTLE_MS) {
-            if (i == 0) onUpPress(now);
-            if (i == 1) onDnPress(now);
-          }
-          if (prefsDirty) { savePrefs(); prefsDirty = false; }
-        }
-      }
-      continue;
-    }
-
-    if (!b.stablePressed) continue;
-
-    if (i == 2) {
-      if (!centerLongPressHandled && (now - b.pressedAt) >= CTR_LONGPRESS_MS) {
-        b.phase = BTN_HELD;
-        onCenterLongPress(now);
-      }
+  auto registerPress = [&]() {
+    if (now - estopWindowStart > ESTOP_WINDOW_MS) {
+      estopPressCount  = 1;
+      estopWindowStart = now;
     } else {
-      if ((now - b.pressedAt) >= RAMP_DELAY_MS) {
-        b.phase = BTN_HELD;
+      estopPressCount++;
+    }
+    if (estopPressCount >= ESTOP_PRESSES) {
+      estopPressCount = 0;
+      if (stopLatched) {
+        stopLatched = false;
+        DBGLN("E-stop released");
+      } else {
+        stopLatched  = true;
+        modeRunning  = false;
+        applyHeater(false);
+        DBGLN("E-stop LATCHED");
       }
-      if (b.phase == BTN_HELD && now >= b.nextFire) {
-        if (i == 0) setpoint = min(setpoint + b.currentStep, 1200.0f);
-        if (i == 1) setpoint = max(setpoint - b.currentStep, 0.0f);
-        b.currentInterval = max((float)RAMP_RATE_MIN_MS, b.currentInterval * RAMP_ACCEL);
-        b.currentStep     = min(SP_STEP_MAX, b.currentStep * SP_STEP_ACCEL);
-        b.nextFire        = now + (unsigned long)b.currentInterval;
-        prefsDirty = true;
-        prefsDirtyMs = now;
-      }
+    }
+  };
+
+  for (int i = 0; i < 3; i++) {
+    bool low = !digitalRead(btns[i].pin);
+    switch (btns[i].phase) {
+
+      case BTN_IDLE:
+        if (low) { btns[i].phase = BTN_PENDING; btns[i].pendingSince = now; }
+        break;
+
+      case BTN_PENDING:
+        if (!low) {
+          btns[i].phase = BTN_IDLE;
+          if (i == 2) {
+            if (stopLatched) {
+              registerPress();
+            } else {
+              bool handled = false;
+              if (modeRunning) {
+                modeRunning = false;
+                applyHeater(false);
+                runActive   = false;
+                closeRunLog();
+                DBGLN("Mode stopped");
+                handled = true;
+              } else {
+                modeRunning = true;
+                if (selectedMode == MODE_AUTO_RAMP) {
+                  rampState        = RS_IDLE;
+                  rampStep         = 0;
+                  rampOvershootAmt = 0.0f;
+                  learnedCount     = 0;
+                  finalSoakStartMs = 0;
+                  resetStabilityBuf();
+                  coastingDropCount = 0;
+                  memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+                  memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+                  memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+                  memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+                  runActive  = true;
+                  runStartMs = now;
+                  cacheHead  = 0;
+                  cacheCount = 0;
+                  openRunLog();
+                } else if (selectedMode == MODE_BANG_BANG) {
+                  runActive  = true;
+                  runStartMs = now;
+                  cacheHead  = 0;
+                  cacheCount = 0;
+                  openRunLog();
+                }
+                DBGLN("Mode started");
+                handled = true;
+              }
+              if (!handled) registerPress();
+            }
+          }
+        } else if (now - btns[i].pendingSince >= (i == 2 ? RAMP_DELAY_MS : DEBOUNCE_MS)) {
+          btns[i].phase    = BTN_HELD;
+          btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
+          btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
+          btns[i].currentStep     = SP_STEP_INITIAL;
+          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); prefsDirty = true; prefsDirtyMs = now; }
+          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); prefsDirty = true; prefsDirtyMs = now; }
+        }
+        break;
+
+      case BTN_HELD:
+        if (!low) {
+          btns[i].phase = BTN_IDLE;
+          btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
+          btns[i].currentStep     = SP_STEP_INITIAL;
+          if (prefsDirty) { savePrefs(); prefsDirty = false; }
+        } else if (i == 2 && now >= btns[i].nextFire) {
+          btns[i].nextFire = ULONG_MAX;
+          modeRunning = false;
+          applyHeater(false);
+          runActive = false;
+          closeRunLog();
+          selectedMode = (RunMode)((selectedMode + 1) % 3);
+          modeOverlayUntil = now + MODE_OVERLAY_MS;
+          DBG("Mode selected: "); DBGLN(selectedMode);
+        }
+        if (i != 2) {
+          if (now >= btns[i].nextFire) {
+            if (i == 0) setpoint = min(setpoint + btns[i].currentStep, 1200.0f);
+            if (i == 1) setpoint = max(setpoint - btns[i].currentStep,    0.0f);
+            btns[i].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[i].currentInterval * RAMP_ACCEL);
+            btns[i].currentStep     = min(SP_STEP_MAX, btns[i].currentStep * SP_STEP_ACCEL);
+            btns[i].nextFire        = now + (unsigned long)btns[i].currentInterval;
+            prefsDirty = true; prefsDirtyMs = now;
+          }
+        }
+        break;
     }
   }
 }
 
+// ─── Temperature ──────────────────────────────────────────────────────────────
 float rawTempC() {
   float smV   = ina219.getShuntVoltage_mV();
   float cjc_C = temperatureRead() + cjcOffset;
@@ -839,11 +805,14 @@ float medianOf(float* arr, uint8_t n) {
   return tmp[n/2];
 }
 
+// ─── Bang-bang control ────────────────────────────────────────────────────────
 void controlLoop() {
   if      (currentTemp < setpoint - hysteresis) applyHeater(true);
   else if (currentTemp > setpoint + hysteresis) applyHeater(false);
 }
 
+// ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
+// This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
   if (rampStep >= activeProfile.stepCount) {
     rampStep = activeProfile.stepCount > 0 ? activeProfile.stepCount - 1 : 0;
@@ -853,6 +822,7 @@ void rampControlLoop() {
   float stepTarget  = activeProfile.stepTargets[rampStep];
 
   switch (rampState) {
+
     case RS_IDLE:
       rampStep           = 0;
       rampState          = RS_HEATING;
@@ -1014,6 +984,7 @@ void rampControlLoop() {
   }
 }
 
+// ─── WiFi helpers ─────────────────────────────────────────────────────────────
 void startSTA() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(savedSSID.c_str(), savedPSK.c_str());
@@ -1043,6 +1014,7 @@ void onWifiConnect() {
   serverStarted = true;
 }
 
+// ─── OTA ──────────────────────────────────────────────────────────────────────
 void setupOTA() {
   ArduinoOTA.setHostname(HOSTNAME);
   ArduinoOTA.onStart([]()  { DBGLN("OTA start"); });
@@ -1050,6 +1022,7 @@ void setupOTA() {
   ArduinoOTA.begin();
 }
 
+// ─── Prefs ────────────────────────────────────────────────────────────────────
 void loadPrefs() {
   prefs.begin("therm", true);
   setpoint      = prefs.getFloat ("sp",    500.0);
@@ -1068,6 +1041,7 @@ void loadPrefs() {
   cjcOffset     = prefs.getFloat ("cjco", -12.0);
   webUser = prefs.getString("wuser", "admin");
   webPass = prefs.getString("wpass", "thermostat");
+  // Active ramp profile (Stage 4)
   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
   activeProfile.name[31] = '\0';
   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
@@ -1105,6 +1079,7 @@ void savePrefs() {
   prefs.putFloat ("cjco",  cjcOffset);
   prefs.putString("wuser", webUser);
   prefs.putString("wpass", webPass);
+  // Active ramp profile (Stage 4)
   prefs.putString("rp_name",     activeProfile.name);
   prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
   prefs.putFloat ("rp_stab",     activeProfile.stabilityThreshC);
@@ -1124,6 +1099,7 @@ bool requireAuth() {
   return false;
 }
 
+// ─── Web routes ───────────────────────────────────────────────────────────────
 void setupRoutes() {
   server.onNotFound([]() {
     String host = apMode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
@@ -1169,6 +1145,7 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
+  // ── Pin/GPIO debug status ─────────────────────────────────────────────────
   server.on("/pinstatus", HTTP_GET, []() {
     bool btnUp  = !digitalRead(PIN_BTN_UP);
     bool btnDn  = !digitalRead(PIN_BTN_DN);
@@ -1196,5 +1173,441 @@ void setupRoutes() {
       + ",\"pinSCL\":"       + String(PIN_SCL)
       + "}";
     server.send(200, "application/json", j);
+  });
+
+  // ── Ramp status (Stage 2) ───────────────────────────────────────────────
+  server.on("/rampstatus", HTTP_GET, []() {
+    uint8_t safeStep = min(rampStep, (uint8_t)(activeProfile.stepCount - 1));
+
+    // Build learned steps JSON array
+    String learned = "[";
+    for (uint8_t i = 0; i < learnedCount; i++) {
+      if (i) learned += ",";
+      learned += "{\"step\":"        + String(i)
+               + ",\"target\":"      + String(activeProfile.stepTargets[i], 1)
+               + ",\"fireStart\":"   + String(learnedFireStartTemp[i], 1)
+               + ",\"cutoff\":"      + String(learnedCutoffTemp[i],    1)
+               + ",\"peak\":"        + String(learnedPeakTemp[i],      1)
+               + ",\"coastRatio\":"  + String(learnedCoastRatio[i],   4)
+               + "}";
+    }
+    learned += "]";
+
+    // Current predicted peak (only meaningful in RS_HEATING)
+    float rise = currentTemp - rampFireStartTemp;
+    float predPeak = (rampState == RS_HEATING)
+      ? currentTemp + rise * effectiveCoastRatio(activeProfile.stepTargets[safeStep])
+      : 0.0f;
+
+    unsigned long stateAgeMs = millis() - rampStateEnteredMs;
+    long soakRemain = 0;
+    if (rampState == RS_FINAL_SOAK) {
+      long total = (long)(activeProfile.soakMinutes * 60.0f);
+      soakRemain = total - (long)((millis() - finalSoakStartMs) / 1000UL);
+      if (soakRemain < 0) soakRemain = 0;
+    }
+
+    String j = "{\"rampState\":" + String((int)rampState)
+             + ",\"rampStep\":" + String(rampStep)
+             + ",\"stepCount\":" + String(activeProfile.stepCount)
+             + ",\"stepTarget\":" + String(activeProfile.stepTargets[safeStep], 1)
+             + ",\"finalTarget\":" + String(activeProfile.stepTargets[activeProfile.stepCount-1], 1)
+             + ",\"predictedPeak\":" + String(predPeak, 1)
+             + ",\"overshootAmt\":" + String(rampOvershootAmt, 1)
+             + ",\"coastBase\":" + String(activeProfile.coastBase, 4)
+             + ",\"coastSlope\":" + String(activeProfile.coastSlope, 4)
+             + ",\"stateAgeMs\":" + String(stateAgeMs)
+             + ",\"soakRemainS\":" + String(soakRemain)
+             + ",\"learnedCount\":" + String(learnedCount)
+             + ",\"learned\":" + learned
+             + "}";
+    server.send(200, "application/json", j);
+  });
+
+  // /profile: read current active ramp profile
+  server.on("/profile", HTTP_GET, []() {
+    String steps = "[";
+    for (uint8_t i = 0; i < activeProfile.stepCount; i++) {
+      if (i) steps += ",";
+      steps += String(activeProfile.stepTargets[i], 1);
+    }
+    steps += "]";
+    String j = "{\"name\":\"" + String(activeProfile.name) + "\""
+             + ",\"stepTargets\":" + steps
+             + ",\"stepCount\":" + String(activeProfile.stepCount)
+             + ",\"soakMinutes\":" + String(activeProfile.soakMinutes, 1)
+             + ",\"stabilityThresh\":" + String(activeProfile.stabilityThreshC, 1)
+             + ",\"coastBase\":" + String(activeProfile.coastBase, 4)
+             + ",\"coastSlope\":" + String(activeProfile.coastSlope, 4)
+             + ",\"complete\":" + String(activeProfile.complete ? 1 : 0)
+             + "}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/profile", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    // Accept any subset of fields
+    if (server.hasArg("name")) {
+      strncpy(activeProfile.name, server.arg("name").c_str(), 31);
+      activeProfile.name[31] = '\0';
+    }
+    if (server.hasArg("soakMin")) activeProfile.soakMinutes = server.arg("soakMin").toFloat();
+    if (server.hasArg("stability")) activeProfile.stabilityThreshC = server.arg("stability").toFloat();
+    if (server.hasArg("coastBase")) activeProfile.coastBase = server.arg("coastBase").toFloat();
+    if (server.hasArg("coastSlope")) activeProfile.coastSlope = server.arg("coastSlope").toFloat();
+    // Step targets: comma-separated string, e.g. "150,300,420,470,490,500"
+    if (server.hasArg("steps")) {
+      String s = server.arg("steps");
+      uint8_t n = 0;
+      int start = 0, comma;
+      while ((comma = s.indexOf(',', start)) != -1 && n < RAMP_MAX_STEPS) {
+        activeProfile.stepTargets[n++] = s.substring(start, comma).toFloat();
+        start = comma + 1;
+      }
+      if (start < (int)s.length() && n < RAMP_MAX_STEPS)
+        activeProfile.stepTargets[n++] = s.substring(start).toFloat();
+      activeProfile.stepCount = n;
+    }
+    savePrefs();
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/profiles", HTTP_GET, []() {
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    String json = "[";
+    bool first  = true;
+    File root   = SPIFFS.open(PROFILE_DIR);
+    if (root && root.isDirectory()) {
+      File f = root.openNextFile();
+      while (f) {
+        String fname = String(f.name());
+        if (fname.endsWith(".json")) {
+          int slash = fname.lastIndexOf('/');
+          String pname = fname.substring(slash + 1, fname.length() - 5);
+          if (!first) json += ",";
+          json += "\"" + pname + "\"";
+          first = false;
+        }
+        f.close();
+        f = root.openNextFile();
+      }
+      root.close();
+    }
+    json += "]";
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/profiles/save", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (server.hasArg("name") && server.arg("name").length() > 0) {
+      String n = server.arg("name");
+      n.trim();
+      for (int i = 0; i < (int)n.length(); i++) {
+        char c = n[i];
+        if (!isAlphaNumeric(c) && c != '-' && c != '_') { n.setCharAt(i, '_'); }
+      }
+      strncpy(activeProfile.name, n.c_str(), 31);
+      activeProfile.name[31] = '\0';
+    }
+    String path = String(PROFILE_DIR) + "/" + activeProfile.name + ".json";
+    File f = SPIFFS.open(path, FILE_WRITE);
+    if (!f) { server.send(500, "text/plain", "Failed to open file"); return; }
+    f.print(profileToJson(activeProfile));
+    f.close();
+    savePrefs();
+    DBG("Profile saved to SPIFFS: "); DBGLN(path);
+    server.send(200, "application/json",
+      "{\"saved\":\"" + String(activeProfile.name) + "\"}");
+  });
+
+  server.on("/profiles/load", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (!server.hasArg("name") || !server.arg("name").length()) {
+      server.send(400, "text/plain", "Missing name"); return;
+    }
+    String n = server.arg("name");
+    n.trim();
+    String path = String(PROFILE_DIR) + "/" + n + ".json";
+    if (!SPIFFS.exists(path)) {
+      server.send(404, "text/plain", "Profile not found"); return;
+    }
+    File f = SPIFFS.open(path, FILE_READ);
+    if (!f) { server.send(500, "text/plain", "Failed to open file"); return; }
+    String json = f.readString();
+    f.close();
+    RampProfile tmp;
+    if (!profileFromJson(json, tmp)) {
+      server.send(500, "text/plain", "Parse error"); return;
+    }
+    activeProfile = tmp;
+    savePrefs();
+    DBG("Profile loaded from SPIFFS: "); DBGLN(path);
+    server.send(200, "application/json", profileToJson(activeProfile));
+  });
+
+  server.on("/profiles/delete", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!spiffsOk) { server.send(503, "text/plain", "SPIFFS unavailable"); return; }
+    if (!server.hasArg("name") || !server.arg("name").length()) {
+      server.send(400, "text/plain", "Missing name"); return;
+    }
+    String n    = server.arg("name");
+    n.trim();
+    String path = String(PROFILE_DIR) + "/" + n + ".json";
+    if (!SPIFFS.exists(path)) {
+      server.send(404, "text/plain", "Not found"); return;
+    }
+    SPIFFS.remove(path);
+    DBG("Profile deleted: "); DBGLN(path);
+    server.send(200, "application/json", "{\"deleted\":\"" + n + "\"}");
+  });
+
+  // ── Run control ──────────────────────────────────────────────────────────────
+  // POST /run  body: mode=bangbang|autoramp&action=start|stop
+  server.on("/run", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    String modeStr   = server.arg("mode");
+    String actionStr = server.arg("action");
+
+    if (actionStr == "start") {
+      if (stopLatched) { server.send(403, "text/plain", "E-stop latched"); return; }
+      selectedMode = (modeStr == "autoramp") ? MODE_AUTO_RAMP
+                   : (modeStr == "manual")   ? MODE_MANUAL
+                   :                           MODE_BANG_BANG;
+      modeRunning  = true;
+      runActive    = true;
+      runStartMs = millis();
+      cacheHead  = 0;
+      cacheCount = 0;
+      openRunLog();
+      if (selectedMode == MODE_AUTO_RAMP) {
+        rampState         = RS_IDLE;
+        rampStep          = 0;
+        rampOvershootAmt  = 0.0f;
+        learnedCount      = 0;
+        finalSoakStartMs  = 0;
+        resetStabilityBuf();
+        coastingDropCount = 0;
+        memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+        memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+        memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+        memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+      }
+      DBGLN("Run started mode=" + modeStr);
+    } else if (actionStr == "stop") {
+      modeRunning = false;
+      runActive   = false;
+      applyHeater(false);
+      closeRunLog();
+      DBGLN("Run stopped");
+    } else {
+      server.send(400, "text/plain", "action must be start or stop"); return;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // ── Incremental log (since T seconds) ────────────────────────────────────────
+  // GET /log?since=N  -> CSV rows where t_s > N
+  // If no since param, returns all cached rows.
+  // Tries SPIFFS first; falls back to RAM cache.
+  server.on("/log", HTTP_GET, []() {
+    uint32_t since = 0;
+    if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
+
+    if (runLogFile) runLogFile.flush();
+
+    // Try SPIFFS
+    if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
+      File f = SPIFFS.open(LOG_PATH, FILE_READ);
+      if (f) {
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.sendHeader("Content-Type", "text/plain");
+        server.sendHeader("Connection", "close");
+        server.send(200, "text/plain", "");
+        server.sendContent("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n");
+        String line;
+        bool firstLine = true;
+        while (f.available()) {
+          line = f.readStringUntil('\n');
+          if (firstLine) { firstLine = false; continue; } // skip file header
+          if (!line.length()) continue;
+          // parse t_s (first field)
+          int comma = line.indexOf(',');
+          if (comma < 0) continue;
+          uint32_t ts = (uint32_t)line.substring(0, comma).toInt();
+          if (ts > since) server.sendContent(line + "\n");
+        }
+        f.close();
+        server.sendContent(""); // end chunked
+        return;
+      }
+    }
+    // RAM cache fallback
+    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
+    uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
+    for (uint16_t i = 0; i < count; i++) {
+      CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
+      if (s.t_s > since) {
+        out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
+             + "," + String(s.output) + "," + String(s.mode)
+             + "," + String(s.ramp_state) + "," + String(s.step_idx)
+             + "," + String(s.coast_ratio, 4) + "\n";
+      }
+    }
+    server.send(200, "text/plain", out);
+  });
+
+  // ── Full log download ─────────────────────────────────────────────────────────
+  // GET /log/full  -> entire runlog.csv as file download
+  server.on("/log/full", HTTP_GET, []() {
+    if (runLogFile) runLogFile.flush();
+
+    if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
+      File f = SPIFFS.open(LOG_PATH, FILE_READ);
+      if (f) {
+        server.sendHeader("Content-Disposition", "attachment; filename=\"runlog.csv\"");
+        server.setContentLength(f.size());
+        server.send(200, "text/csv", "");
+        uint8_t buf[256];
+        while (f.available()) {
+          size_t n = f.read(buf, sizeof(buf));
+          server.sendContent_P((const char*)buf, n);
+        }
+        f.close();
+        server.sendContent("");
+        return;
+      }
+    }
+    // Fallback: serve RAM cache as CSV
+    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
+    uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
+    for (uint16_t i = 0; i < count; i++) {
+      CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
+      out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
+           + "," + String(s.output) + "," + String(s.mode)
+           + "," + String(s.ramp_state) + "," + String(s.step_idx)
+           + "," + String(s.coast_ratio, 4) + "\n";
+    }
+    server.sendHeader("Content-Disposition", "attachment; filename=\"runlog_cache.csv\"");
+    server.send(200, "text/csv", out);
+  });
+
+  server.on("/calibrate", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
+        !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
+      server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
+      return;
+    }
+    float mv1   = server.arg("mv1").toFloat();
+    float temp1 = server.arg("temp1").toFloat();
+    float cjc1  = server.arg("cjc1").toFloat();
+    float mv2   = server.arg("mv2").toFloat();
+    float cjc2  = server.arg("cjc2").toFloat();
+    float temp2 = server.arg("temp2").toFloat();
+    if (temp2 <= temp1) { server.send(400, "text/plain", "temp2 must be > temp1"); return; }
+    calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
+    calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
+    float dMv   = mv2 - mv1;
+    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);
+    customUvPerC = (dMv * 1000.0f) / dTemp;
+    probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
+    savePrefs();
+    server.send(200, "application/json",
+      String("{\"uvPerC\":") + String(customUvPerC, 4)
+      + ",\"offset\":" + String(probeOffset, 4) + "}");
+  });
+
+  server.on("/calibrate/clear", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    customUvPerC = 0.0f;
+    probeOffset  = 0.0f;
+    savePrefs();
+    server.send(200, "application/json", "{\"status\":\"cleared\"}");
+  });
+
+  server.on("/history", HTTP_GET, []() {
+    String j = "[";
+    uint16_t start = (histCount < HIST_SIZE) ? 0 : histHead;
+    for (uint16_t i = 0; i < histCount; i++) {
+      if (i) j += ",";
+      j += String(tempHistory[(start + i) % HIST_SIZE], 1);
+    }
+    j += "]";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/config", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (server.hasArg("sp"))    setpoint    = server.arg("sp").toFloat();
+    if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
+    if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
+    if (server.hasArg("ptype")) probeType   = server.arg("ptype").toInt();
+    if (server.hasArg("cjco"))  cjcOffset   = server.arg("cjco").toFloat();
+    savePrefs();
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/wifi", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (server.hasArg("ssid") && server.hasArg("psk")) {
+      savedSSID = server.arg("ssid");
+      savedPSK  = server.arg("psk");
+      savePrefs();
+      server.send(200, "text/plain", "Saved. Rebooting...");
+      delay(1000);
+      ESP.restart();
+    } else {
+      server.send(400, "text/plain", "Missing ssid or psk");
+    }
+  });
+
+  server.on("/stop", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    String action = server.arg("action");
+    if (action == "latch") {
+      stopLatched = true;
+      modeRunning = false;
+      runActive   = false;
+      applyHeater(false);
+      closeRunLog();
+    } else if (action == "release") {
+      stopLatched = false;
+    } else {
+      server.send(400, "text/plain", "action must be latch or release"); return;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/manual", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (stopLatched)              { server.send(403, "text/plain", "E-stop latched"); return; }
+    if (selectedMode != MODE_MANUAL) { server.send(400, "text/plain", "Not in manual mode"); return; }
+    String action = server.arg("action");
+    if      (action == "on")  applyHeater(true);
+    else if (action == "off") applyHeater(false);
+    else { server.send(400, "text/plain", "action must be on or off"); return; }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/auth", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!server.hasArg("user") || !server.hasArg("pass")) {
+      server.send(400, "text/plain", "Missing user or pass"); return;
+    }
+    String u = server.arg("user"); u.trim();
+    String p = server.arg("pass"); p.trim();
+    if (!u.length() || !p.length()) {
+      server.send(400, "text/plain", "user and pass must not be empty"); return;
+    }
+    webUser = u;
+    webPass = p;
+    savePrefs();
+    DBGLN("Auth credentials updated");
+    server.send(200, "text/plain", "OK");
   });
 }
