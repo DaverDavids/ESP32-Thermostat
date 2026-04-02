@@ -10,72 +10,132 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 <style>
   body{font-family:sans-serif;background:#1a1a2e;color:#eee;margin:0;padding:1rem}
   h2{margin:.5rem 0;color:#e94560}
-  .card{background:#16213e;border-radius:8px;padding:1rem;margin-bottom:1rem}
-  .big{font-size:3rem;font-weight:bold;color:#0f3460}
+  .card{background:#16213e;border-radius:8px;padding:1rem;margin-bottom:0}
+  .big{font-size:2.2rem;font-weight:bold}
   .big span{color:#e94560}
   label{display:block;margin:.4rem 0 .1rem}
   input,select{width:100%;padding:.4rem;border-radius:4px;border:none;background:#0f3460;color:#eee;box-sizing:border-box}
   button{margin-top:.6rem;padding:.5rem 1.2rem;background:#e94560;color:#fff;border:none;border-radius:4px;cursor:pointer}
   canvas{width:100%!important;max-height:200px}
   .badge{display:inline-block;padding:.2rem .6rem;border-radius:4px;font-size:.85rem}
-  .on{background:#2ecc71}.off{background:#e74c3c}.auto{background:#2980b9}
+  .on{background:#2ecc71;color:#111}.off{background:#e74c3c}.auto{background:#2980b9}
   #wifiSection{display:none}
   #logInfo{font-size:.85rem;color:#aaa;margin-top:.4rem}
+
+  /* ── Layout grid ── */
+  .row{display:grid;gap:.75rem;margin-bottom:.75rem}
+  .row-2{grid-template-columns:1fr 1fr}
+  .row-3{grid-template-columns:1fr 1fr 1fr}
+  .row-1{grid-template-columns:1fr}
+
+  /* stack single-column on narrow screens */
+  @media(max-width:600px){
+    .row-2,.row-3{grid-template-columns:1fr}
+  }
+
+  /* ── Ramp status value cells ── */
+  .rs-val{font-size:1.55rem;font-weight:bold;color:#e94560;line-height:1.15}
+  .rs-val.good{color:#2ecc71}
+  .rs-val.warn{color:#f39c12}
+  .rs-val.alert{color:#e74c3c}
+  .rs-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+    gap:.5rem .75rem;
+    margin-bottom:.6rem;
+  }
+  .rs-cell{}
+  .rs-label{font-size:.78rem;color:#aaa;margin-bottom:.15rem}
 </style>
 </head>
 <body>
 
-<div class="card" id="stopPanel">
-  <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
-    <button id="btnStop" onclick="toggleStop()" style="background:#e74c3c;">&#x26A0; STOP</button>
-    <span id="stopStatus" style="font-size:.9rem;color:#aaa;">Normal operation</span>
-  </div>
-</div>
-
-<div class="card">
-  <h2>&#x1F321; Live Temperature</h2>
-  <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
-  <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
-  <div id="manualControls" style="margin-top:.8rem;display:none;gap:.5rem;flex-wrap:wrap;">
-    <button onclick="setManual('on')">Manual ON</button>
-    <button onclick="setManual('off')" style="background:#555;">Manual OFF</button>
-  </div>
-</div>
-
-<div class="card">
-  <h2>&#x25B6; Run Control</h2>
-  <div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;">
-    <div style="flex:1;min-width:140px;">
-      <label style="margin-bottom:.3rem;">Mode
-        <select id="runModeSelect">
-          <option value="manual">Manual (On/Off)</option>
-          <option value="bangbang">Bang-Bang</option>
-          <option value="autoramp">Auto-Ramp</option>
-        </select>
-      </label>
+<!-- ── E-stop bar ─────────────────────────────────────────────────────────── -->
+<div class="row row-1" style="margin-bottom:.75rem">
+  <div class="card" id="stopPanel">
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+      <button id="btnStop" onclick="toggleStop()" style="background:#e74c3c;">&#x26A0; STOP</button>
+      <span id="stopStatus" style="font-size:.9rem;color:#aaa;">Normal operation</span>
     </div>
-    <button onclick="startRun()" style="background:#2ecc71;color:#111;">&#x25B6; Start</button>
-    <button onclick="stopRun()"  style="background:#e74c3c;">&#x25A0; Stop</button>
   </div>
-  <div id="runStatus" style="margin-top:.5rem;font-size:.9rem;color:#aaa;">No run active.</div>
 </div>
 
+<!-- ── Row 1: Live Temp + Run Control ────────────────────────────────────── -->
+<div class="row row-2">
+  <div class="card">
+    <h2>&#x1F321; Live Temperature</h2>
+    <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
+    <div style="margin-top:.4rem">Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
+    <div id="manualControls" style="margin-top:.8rem;display:none;gap:.5rem;flex-wrap:wrap;">
+      <button onclick="setManual('on')">Manual ON</button>
+      <button onclick="setManual('off')" style="background:#555;">Manual OFF</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>&#x25B6; Run Control</h2>
+    <div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;">
+      <div style="flex:1;min-width:120px;">
+        <label style="margin-bottom:.3rem;">Mode
+          <select id="runModeSelect">
+            <option value="manual">Manual (On/Off)</option>
+            <option value="bangbang">Bang-Bang</option>
+            <option value="autoramp">Auto-Ramp</option>
+          </select>
+        </label>
+      </div>
+      <button onclick="startRun()" style="background:#2ecc71;color:#111;">&#x25B6; Start</button>
+      <button onclick="stopRun()"  style="background:#e74c3c;">&#x25A0; Stop</button>
+    </div>
+    <div id="runStatus" style="margin-top:.5rem;font-size:.9rem;color:#aaa;">No run active.</div>
+  </div>
+</div>
+
+<!-- ── Row 2: Auto-Ramp Status (full width) ───────────────────────────────── -->
+<div class="row row-1">
   <div class="card" id="rampPanel" style="display:none;">
     <h2>&#x1F525; Auto-Ramp Status</h2>
-    <table style="width:100%;font-size:.9rem;border-collapse:collapse;" id="rampTable">
-      <tr><td style="color:#aaa;width:45%">State</td>       <td id="rsState">--</td></tr>
-      <tr><td style="color:#aaa;">Step</td>                 <td id="rsStep">--</td></tr>
-      <tr><td style="color:#aaa;">Step Target</td>          <td id="rsTarget">--</td></tr>
-      <tr><td style="color:#aaa;">Predicted Peak</td>       <td id="rsPredPeak">--</td></tr>
-      <tr><td style="color:#aaa;">Overshoot</td>            <td id="rsOvershoot">--</td></tr>
-      <tr><td style="color:#aaa;">Coast Ratio (cur est)</td><td id="rsCoastCur">--</td></tr>
-      <tr><td style="color:#aaa;">Coast Model</td>          <td id="rsCoastModel">--</td></tr>
-      <tr><td style="color:#aaa;">Time in State</td>        <td id="rsAge">--</td></tr>
-      <tr><td style="color:#aaa;">Soak Remaining</td>       <td id="rsSoakRemain">--</td></tr>
-    </table>
-    <div style="margin-top:.8rem;">
+    <div class="rs-grid">
+      <div class="rs-cell">
+        <div class="rs-label">State</div>
+        <div class="rs-val" id="rsState">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Step</div>
+        <div class="rs-val" id="rsStep">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Step Target</div>
+        <div class="rs-val" id="rsTarget">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Predicted Peak</div>
+        <div class="rs-val" id="rsPredPeak">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Overshoot</div>
+        <div class="rs-val" id="rsOvershoot">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Coast Ratio (cur est)</div>
+        <div class="rs-val" id="rsCoastCur">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Coast Model</div>
+        <div class="rs-val" style="font-size:1.1rem" id="rsCoastModel">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Time in State</div>
+        <div class="rs-val" id="rsAge">--</div>
+      </div>
+      <div class="rs-cell">
+        <div class="rs-label">Soak Remaining</div>
+        <div class="rs-val" id="rsSoakRemain">--</div>
+      </div>
+    </div>
+    <div style="margin-top:.4rem;">
       <strong style="color:#aaa;font-size:.85rem;">Learned Steps</strong>
-      <table id="learnedTable" style="width:100%;font-size:.8rem;margin-top:.3rem;border-collapse:collapse;">
+      <table id="learnedTable" style="width:100%;font-size:.85rem;margin-top:.3rem;border-collapse:collapse;">
         <thead><tr>
           <th style="text-align:left;color:#aaa;">Step</th>
           <th style="text-align:right;color:#aaa;">FireStart</th>
@@ -87,7 +147,10 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       </table>
     </div>
   </div>
+</div>
 
+<!-- ── Row 3: Ramp Profile + Profile Library ─────────────────────────────── -->
+<div class="row row-2">
   <div class="card" id="profilePanel" style="display:none;">
     <h2>&#x1F4CB; Ramp Profile</h2>
     <form id="profileForm">
@@ -110,7 +173,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div class="card" id="profileLibPanel" style="display:none;">
     <h2>&#x1F4DA; Profile Library</h2>
     <div style="display:flex;gap:.5rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:.6rem;">
-      <div style="flex:1;min-width:160px;">
+      <div style="flex:1;min-width:120px;">
         <label style="margin-bottom:.3rem;">Saved Profiles
           <select id="profileLibSelect" style="width:100%;">
             <option value="">-- select --</option>
@@ -121,63 +184,77 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       <button onclick="deleteSelectedProfile()" style="background:#a33;">&#x1F5D1; Delete</button>
     </div>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
-      <input type="text" id="saveProfileName" placeholder="Save current as..." style="flex:1;min-width:140px;">
+      <input type="text" id="saveProfileName" placeholder="Save current as..." style="flex:1;min-width:120px;">
       <button onclick="saveCurrentProfile()" style="background:#2ecc71;color:#111;">&#x1F4BE; Save</button>
     </div>
     <div id="profileLibMsg" style="margin-top:.4rem;font-size:.85rem;color:#0f9;"></div>
   </div>
-
-<div class="card">
-  <h2>&#x1F4CA; Run Chart</h2>
-  <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
-  <div id="chartLegend" style="font-size:.8rem;color:#aaa;margin-top:.3rem;display:flex;gap:1rem;flex-wrap:wrap;">
-    <span style="color:#0f9;">&#9644; Temperature</span>
-    <span style="color:#e94560;">&#9644; Setpoint</span>
-    <span style="color:#f39c12;">&#9644; Step Targets</span>
-  </div>
-  <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
 </div>
 
-<div class="card" id="runSummaryPanel" style="display:none;">
-  <h2>&#x1F3C1; Run Summary</h2>
-  <div id="runSummaryContent">
-    <table style="width:100%;font-size:.85rem;border-collapse:collapse;">
-      <thead><tr>
-        <th style="text-align:left;color:#aaa;">Step</th>
-        <th style="text-align:right;color:#aaa;">Target</th>
-        <th style="text-align:right;color:#aaa;">Peak</th>
-        <th style="text-align:right;color:#aaa;">Overshoot</th>
-        <th style="text-align:right;color:#aaa;">CoastR</th>
-        <th style="text-align:right;color:#aaa;">FireStart</th>
-        <th style="text-align:right;color:#aaa;">Cutoff</th>
-      </tr></thead>
-      <tbody id="summaryBody"></tbody>
-    </table>
-    <div id="summaryFooter" style="margin-top:.5rem;font-size:.85rem;color:#aaa;"></div>
+<!-- ── Run Chart (full width) ─────────────────────────────────────────────── -->
+<div class="row row-1">
+  <div class="card">
+    <h2>&#x1F4CA; Run Chart</h2>
+    <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
+    <div id="chartLegend" style="font-size:.8rem;color:#aaa;margin-top:.3rem;display:flex;gap:1rem;flex-wrap:wrap;">
+      <span style="color:#0f9;">&#9644; Temperature</span>
+      <span style="color:#e94560;">&#9644; Setpoint</span>
+      <span style="color:#f39c12;">&#9644; Step Targets</span>
+    </div>
+    <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
   </div>
 </div>
 
-<div class="card">
-  <h2>&#x1F4BE; Data Log</h2>
-  <div id="logInfo">No run data in browser yet.</div>
-  <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;">
-    <button onclick="exportCSV()" style="background:#2980b9;">&#x2B07; Export CSV</button>
-    <button onclick="clearBrowserLog()" style="background:#555;">Clear Browser Log</button>
-    <button onclick="rePullLog()" style="background:#555;">Re-pull from Device</button>
+<!-- ── Run Summary (full width, shown after ramp completes) ──────────────── -->
+<div class="row row-1">
+  <div class="card" id="runSummaryPanel" style="display:none;">
+    <h2>&#x1F3C1; Run Summary</h2>
+    <div id="runSummaryContent">
+      <table style="width:100%;font-size:.85rem;border-collapse:collapse;">
+        <thead><tr>
+          <th style="text-align:left;color:#aaa;">Step</th>
+          <th style="text-align:right;color:#aaa;">Target</th>
+          <th style="text-align:right;color:#aaa;">Peak</th>
+          <th style="text-align:right;color:#aaa;">Overshoot</th>
+          <th style="text-align:right;color:#aaa;">CoastR</th>
+          <th style="text-align:right;color:#aaa;">FireStart</th>
+          <th style="text-align:right;color:#aaa;">Cutoff</th>
+        </tr></thead>
+        <tbody id="summaryBody"></tbody>
+      </table>
+      <div id="summaryFooter" style="margin-top:.5rem;font-size:.85rem;color:#aaa;"></div>
+    </div>
   </div>
 </div>
 
-<div class="card">
-  <h2>&#x2699;&#xFE0F; Configuration</h2>
-  <form id="cfgForm">
-    <label>Setpoint (&deg;C)<input type="number" step="1" name="sp" id="cfgSp"></label>
-    <label>Hysteresis (&deg;C)<input type="number" step="0.5" name="hyst" id="cfgHyst"></label>
-    <label>Probe Offset (&deg;C)<input type="number" step="0.5" name="off" id="cfgOff"></label>
-    <button type="submit">Save Config</button>
-  </form>
-  <div style="margin-top:.8rem;border-top:1px solid #333;padding-top:.6rem;">
-    <strong style="font-size:.85rem;color:#aaa;">&#x1F512; Change Web Password</strong>
-    <label style="margin-top:.4rem;">Username
+<!-- ── Data Log (full width) ─────────────────────────────────────────────── -->
+<div class="row row-1">
+  <div class="card">
+    <h2>&#x1F4BE; Data Log</h2>
+    <div id="logInfo">No run data in browser yet.</div>
+    <div style="margin-top:.6rem;display:flex;gap:.5rem;flex-wrap:wrap;">
+      <button onclick="exportCSV()" style="background:#2980b9;">&#x2B07; Export CSV</button>
+      <button onclick="clearBrowserLog()" style="background:#555;">Clear Browser Log</button>
+      <button onclick="rePullLog()" style="background:#555;">Re-pull from Device</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Row 4: Config + Web Password + WiFi ───────────────────────────────── -->
+<div class="row row-3">
+  <div class="card">
+    <h2>&#x2699;&#xFE0F; Configuration</h2>
+    <form id="cfgForm">
+      <label>Setpoint (&deg;C)<input type="number" step="1" name="sp" id="cfgSp"></label>
+      <label>Hysteresis (&deg;C)<input type="number" step="0.5" name="hyst" id="cfgHyst"></label>
+      <label>Probe Offset (&deg;C)<input type="number" step="0.5" name="off" id="cfgOff"></label>
+      <button type="submit">Save Config</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>&#x1F512; Web Password</h2>
+    <label>Username
       <input type="text" id="authUser" autocomplete="username" placeholder="admin">
     </label>
     <label>New Password
@@ -186,19 +263,22 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <button onclick="changeAuth()" style="background:#e94560;margin-top:.4rem;">Update Credentials</button>
     <div id="authMsg" style="font-size:.85rem;color:#0f9;margin-top:.3rem;"></div>
   </div>
-</div>
 
-<div class="card">
-  <h2>&#x1F4F6; WiFi</h2>
-  <button onclick="document.getElementById('wifiSection').style.display='block'">Change WiFi</button>
-  <div id="wifiSection">
-    <form id="wifiForm">
-      <label>SSID<input type="text" name="ssid"></label>
-      <label>Password<input type="password" name="psk"></label>
-      <button type="submit">Save &amp; Reboot</button>
-    </form>
+  <div class="card">
+    <h2>&#x1F4F6; WiFi</h2>
+    <button onclick="document.getElementById('wifiSection').style.display='block'">Change WiFi</button>
+    <div id="wifiSection">
+      <form id="wifiForm">
+        <label>SSID<input type="text" name="ssid"></label>
+        <label>Password<input type="password" name="psk"></label>
+        <button type="submit">Save &amp; Reboot</button>
+      </form>
+    </div>
   </div>
 </div>
+
+<!-- bottom spacer -->
+<div style="height:.75rem"></div>
 
 <script>
 // ── IndexedDB setup ───────────────────────────────────────────────────────────
@@ -705,11 +785,10 @@ async function pollRamp() {
       : String(rs.rampState);
     const isOvershoot = rs.rampState === 4;
     const stateEl = document.getElementById('rsState');
-    if (stateEl) stateEl.textContent = stateName;
-    if (stateEl) stateEl.style.color = isOvershoot ? '#e74c3c' : '#eee';
+    if (stateEl) { stateEl.textContent = stateName; stateEl.className = 'rs-val' + (isOvershoot ? ' alert' : ''); }
 
     const stepEl = document.getElementById('rsStep');
-    if (stepEl) stepEl.textContent = (rs.rampStep + 1) + ' of ' + rs.stepCount + '  (' + rs.stepTarget.toFixed(1) + '\u00B0C)';
+    if (stepEl) stepEl.textContent = (rs.rampStep + 1) + ' / ' + rs.stepCount;
     const targetEl = document.getElementById('rsTarget');
     if (targetEl) targetEl.textContent = rs.stepTarget.toFixed(1) + '\u00B0C';
     const predEl = document.getElementById('rsPredPeak');
@@ -717,10 +796,10 @@ async function pollRamp() {
     const overEl = document.getElementById('rsOvershoot');
     if (rs.overshootAmt > 0) {
       overEl.textContent = '+' + rs.overshootAmt.toFixed(1) + '\u00B0C \u26A0';
-      overEl.style.color = '#e74c3c';
+      overEl.className = 'rs-val alert';
     } else {
       overEl.textContent = 'none';
-      overEl.style.color = '#0f9';
+      overEl.className = 'rs-val good';
     }
 
     const coastCur = document.getElementById('rsCoastCur');
@@ -824,77 +903,69 @@ function setManual(action) {
 </script>
 
 <!-- ── GPIO / Pin Debug Panel ─────────────────────────────────────── -->
-<div class="card" id="pinDebugPanel">
-  <h2 style="cursor:pointer;user-select:none;" onclick="togglePinPanel()">
-    &#x1F527; GPIO Pin State
-    <span id="pinPanelToggle" style="font-size:.75rem;color:#aaa;margin-left:.5rem;">[collapse]</span>
-  </h2>
-  <div id="pinPanelBody">
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.5rem;margin-bottom:.75rem;">
-
-      <!-- Input pins -->
-      <div class="pin-cell" id="pc-btnUp">
-        <div class="pin-label">BTN UP &nbsp;<span class="pin-num">GPIO5</span></div>
-        <div class="pin-val" id="pv-btnUp">--</div>
-        <div class="pin-phase" id="pp-btnUp">--</div>
+<div style="margin-bottom:.75rem">
+  <div class="card" id="pinDebugPanel">
+    <h2 style="cursor:pointer;user-select:none;" onclick="togglePinPanel()">
+      &#x1F527; GPIO Pin State
+      <span id="pinPanelToggle" style="font-size:.75rem;color:#aaa;margin-left:.5rem;">[collapse]</span>
+    </h2>
+    <div id="pinPanelBody">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.5rem;margin-bottom:.75rem;">
+        <div class="pin-cell" id="pc-btnUp">
+          <div class="pin-label">BTN UP &nbsp;<span class="pin-num">GPIO5</span></div>
+          <div class="pin-val" id="pv-btnUp">--</div>
+          <div class="pin-phase" id="pp-btnUp">--</div>
+        </div>
+        <div class="pin-cell" id="pc-btnDn">
+          <div class="pin-label">BTN DN &nbsp;<span class="pin-num">GPIO7</span></div>
+          <div class="pin-val" id="pv-btnDn">--</div>
+          <div class="pin-phase" id="pp-btnDn">--</div>
+        </div>
+        <div class="pin-cell" id="pc-btnCtr">
+          <div class="pin-label">BTN CTR &nbsp;<span class="pin-num">GPIO6</span></div>
+          <div class="pin-val" id="pv-btnCtr">--</div>
+          <div class="pin-phase" id="pp-btnCtr">--</div>
+        </div>
+        <div class="pin-cell" id="pc-mosfet">
+          <div class="pin-label">MOSFET &nbsp;<span class="pin-num">GPIO0</span></div>
+          <div class="pin-val" id="pv-mosfet">--</div>
+          <div class="pin-phase" id="pp-mosfet" style="font-size:.7rem;color:#aaa;">OUTPUT</div>
+        </div>
+        <div class="pin-cell" style="opacity:.55;">
+          <div class="pin-label">I2C SDA &nbsp;<span class="pin-num">GPIO10</span></div>
+          <div class="pin-val" style="color:#555;">I2C</div>
+          <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
+        </div>
+        <div class="pin-cell" style="opacity:.55;">
+          <div class="pin-label">I2C SCL &nbsp;<span class="pin-num">GPIO8</span></div>
+          <div class="pin-val" style="color:#555;">I2C</div>
+          <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
+        </div>
+        <div class="pin-cell" style="opacity:.55;">
+          <div class="pin-label">MAX6675 SCK &nbsp;<span class="pin-num">GPIO4</span></div>
+          <div class="pin-val" style="color:#555;">SPI</div>
+          <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
+        </div>
+        <div class="pin-cell" style="opacity:.55;">
+          <div class="pin-label">MAX6675 CS &nbsp;<span class="pin-num">GPIO3</span></div>
+          <div class="pin-val" style="color:#555;">SPI</div>
+          <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
+        </div>
+        <div class="pin-cell" style="opacity:.55;">
+          <div class="pin-label">MAX6675 SO &nbsp;<span class="pin-num">GPIO2</span></div>
+          <div class="pin-val" style="color:#555;">SPI</div>
+          <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
+        </div>
       </div>
-      <div class="pin-cell" id="pc-btnDn">
-        <div class="pin-label">BTN DN &nbsp;<span class="pin-num">GPIO7</span></div>
-        <div class="pin-val" id="pv-btnDn">--</div>
-        <div class="pin-phase" id="pp-btnDn">--</div>
+      <div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem;">
+        <span class="badge" id="flag-outputOn">outputOn: --</span>
+        <span class="badge" id="flag-stop">stopLatched: --</span>
+        <span class="badge" id="flag-mode">modeRunning: --</span>
+        <span class="badge" id="flag-estop" style="background:#555;">E-stop count: --</span>
       </div>
-      <div class="pin-cell" id="pc-btnCtr">
-        <div class="pin-label">BTN CTR &nbsp;<span class="pin-num">GPIO6</span></div>
-        <div class="pin-val" id="pv-btnCtr">--</div>
-        <div class="pin-phase" id="pp-btnCtr">--</div>
+      <div style="font-size:.75rem;color:#555;margin-top:.25rem;">
+        Polls /pinstatus every 200 ms &nbsp;&#x2022;&nbsp; Buttons are INPUT_PULLUP (LOW = pressed)
       </div>
-
-      <!-- Output pin -->
-      <div class="pin-cell" id="pc-mosfet">
-        <div class="pin-label">MOSFET &nbsp;<span class="pin-num">GPIO0</span></div>
-        <div class="pin-val" id="pv-mosfet">--</div>
-        <div class="pin-phase" id="pp-mosfet" style="font-size:.7rem;color:#aaa;">OUTPUT</div>
-      </div>
-
-      <!-- I2C (OLED only) -->
-      <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">I2C SDA &nbsp;<span class="pin-num">GPIO10</span></div>
-        <div class="pin-val" style="color:#555;">I2C</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
-      </div>
-      <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">I2C SCL &nbsp;<span class="pin-num">GPIO8</span></div>
-        <div class="pin-val" style="color:#555;">I2C</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
-      </div>
-
-      <!-- MAX6675 SPI (info only) -->
-      <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">MAX6675 SCK &nbsp;<span class="pin-num">GPIO4</span></div>
-        <div class="pin-val" style="color:#555;">SPI</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
-      </div>
-      <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">MAX6675 CS &nbsp;<span class="pin-num">GPIO3</span></div>
-        <div class="pin-val" style="color:#555;">SPI</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
-      </div>
-      <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">MAX6675 SO &nbsp;<span class="pin-num">GPIO2</span></div>
-        <div class="pin-val" style="color:#555;">SPI</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
-      </div>
-    </div>
-
-    <!-- State flags row -->
-    <div style="display:flex;flex-wrap:wrap;gap:.4rem;align-items:center;margin-bottom:.5rem;">
-      <span class="badge" id="flag-outputOn">outputOn: --</span>
-      <span class="badge" id="flag-stop">stopLatched: --</span>
-      <span class="badge" id="flag-mode">modeRunning: --</span>
-      <span class="badge" id="flag-estop" style="background:#555;">E-stop count: --</span>
-    </div>
-    <div style="font-size:.75rem;color:#555;margin-top:.25rem;">
-      Polls /pinstatus every 200 ms &nbsp;&#x2022;&nbsp; Buttons are INPUT_PULLUP (LOW = pressed)
     </div>
   </div>
 </div>
