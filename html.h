@@ -36,11 +36,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <h2>&#x1F321; Live Temperature</h2>
   <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
   <div>Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
-  <div style="margin-top:.5rem;font-size:.9rem;color:#aaa;">
-    <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
-    <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
-    <div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
-  </div>
   <div id="manualControls" style="margin-top:.8rem;display:none;gap:.5rem;flex-wrap:wrap;">
     <button onclick="setManual('on')">Manual ON</button>
     <button onclick="setManual('off')" style="background:#555;">Manual OFF</button>
@@ -178,8 +173,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <label>Setpoint (&deg;C)<input type="number" step="1" name="sp" id="cfgSp"></label>
     <label>Hysteresis (&deg;C)<input type="number" step="0.5" name="hyst" id="cfgHyst"></label>
     <label>Probe Offset (&deg;C)<input type="number" step="0.5" name="off" id="cfgOff"></label>
-    <label>CJC Offset (&deg;C)<input type="number" step="0.5" name="cjco" id="cfgCjco"></label>
-    <div>Current uV/&deg;C: <span id="uvpc">--</span></div>
     <button type="submit">Save Config</button>
   </form>
   <div style="margin-top:.8rem;border-top:1px solid #333;padding-top:.6rem;">
@@ -192,40 +185,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     </label>
     <button onclick="changeAuth()" style="background:#e94560;margin-top:.4rem;">Update Credentials</button>
     <div id="authMsg" style="font-size:.85rem;color:#0f9;margin-top:.3rem;"></div>
-  </div>
-</div>
-
-<div class="card">
-  <h2>&#x1F527; Calibration</h2>
-  <div style="margin-bottom:.5rem;">
-    <label>Probe Mode
-      <select id="cfgPtype" name="ptype" form="cfgForm" onchange="updateCalMode(this.value)">
-        <option value="0">K-Type (~41 &micro;V/&deg;C)</option>
-        <option value="1">J-Type (~52 &micro;V/&deg;C)</option>
-        <option value="2">Manual calibration</option>
-      </select>
-    </label>
-  </div>
-  <div id="calInputs" style="display:none;">
-  <form id="calForm">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
-      <div>
-        <label>Point 1 - mV<input type="number" step="0.0001" name="mv1" id="calMv1"></label>
-        <label>Point 1 - CJC (&deg;C)<input type="number" step="0.1" name="cjc1" id="calCjc1"></label>
-        <label>Point 1 - True Temp (&deg;C)<input type="number" step="0.1" name="temp1" id="calTemp1"></label>
-      </div>
-      <div>
-        <label>Point 2 - mV<input type="number" step="0.0001" name="mv2" id="calMv2"></label>
-        <label>Point 2 - CJC (&deg;C)<input type="number" step="0.1" name="cjc2" id="calCjc2"></label>
-        <label>Point 2 - True Temp (&deg;C)<input type="number" step="0.1" name="temp2" id="calTemp2"></label>
-      </div>
-    </div>
-    <div style="display:flex;gap:.5rem;margin-top:.5rem;">
-      <button type="submit">Calibrate</button>
-      <button type="button" onclick="clearCalibration()" style="background:#a33;">Clear Calibration</button>
-    </div>
-  </form>
-  <div id="calResult" style="margin-top:.5rem;color:#0f9"></div>
   </div>
 </div>
 
@@ -634,7 +593,6 @@ async function showRunSummary(learnedSteps, stepTargets) {
   panel.style.display = 'block';
 }
 
-let currentSetpoint = 500;
 let wasRunActive = false;
 let wasSelectedMode = 0;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
@@ -647,7 +605,6 @@ async function poll() {
     ]);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
-    document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
     const outEl = document.getElementById('out');
     const modeNames = ['MANUAL', 'BANG-BANG', 'AUTO RAMP'];
     if (st.stopLatched) {
@@ -663,7 +620,6 @@ async function poll() {
       outEl.textContent = 'IDLE';
       outEl.className   = 'badge off';
     }
-    currentSetpoint = st.setpoint;
 
     // E-stop panel
     const stopBtn = document.getElementById('btnStop');
@@ -684,7 +640,7 @@ async function poll() {
     const manualControls = document.getElementById('manualControls');
     manualControls.style.display = (st.selectedMode === 0 && !st.stopLatched) ? 'flex' : 'none';
 
-    // Mode selector
+    // Mode selector sync
     const modeValues = ['manual', 'bangbang', 'autoramp'];
     document.getElementById('runModeSelect').value = modeValues[st.selectedMode] || 'bangbang';
 
@@ -724,38 +680,14 @@ async function poll() {
     wasRunActive = st.runActive;
     wasSelectedMode = st.selectedMode;
 
-    if (st.cjcC   !== undefined) document.getElementById('cjcC').textContent    = st.cjcC.toFixed(1);
-    if (st.shuntMV!== undefined) document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
-    if (st.totalMV!== undefined) document.getElementById('totalMV').textContent = st.totalMV.toFixed(4);
-
     if (!document.getElementById('cfgSp').value) {
       document.getElementById('cfgSp').value   = st.setpoint;
       document.getElementById('cfgHyst').value = st.hysteresis;
       document.getElementById('cfgOff').value  = st.offset;
-      const pEl = document.getElementById('cfgPtype');
-      if (pEl) { const pVal = (st.customUvPerC > 0) ? 2 : st.probeType; pEl.value = pVal; updateCalMode(pVal); }
     }
-    if (!document.getElementById('cfgCjco').value && document.getElementById('cfgCjco').value !== '0')
-      document.getElementById('cfgCjco').value = st.cjcOffset;
 
-    const crEl = document.getElementById('calResult');
-    if (st.customUvPerC > 0)
-      crEl.textContent = 'Calibrated uV/\u00B0C = ' + st.customUvPerC.toFixed(4) + ', Offset = ' + st.offset.toFixed(4);
-    else
-      crEl.textContent = '';
-
-    if (document.getElementById('calMv1').value === '') {
-      document.getElementById('calMv1').value   = st.calMv1;
-      document.getElementById('calCjc1').value  = st.calCjc1;
-      document.getElementById('calTemp1').value = st.calTemp1;
-      document.getElementById('calMv2').value   = st.calMv2;
-      document.getElementById('calCjc2').value  = st.calCjc2;
-      document.getElementById('calTemp2').value = st.calTemp2;
-    }
     if (st.runActive) syncLog();
-    if (st.runActive && st.selectedMode === 2) {
-      pollRamp();
-    }
+    if (st.runActive && st.selectedMode === 2) pollRamp();
   } catch(e) { console.warn('poll error', e); }
 }
 
@@ -768,7 +700,6 @@ async function pollRamp() {
     }
     drawRunChart();
 
-    // Map state name
     const stateName = (rs.rampState >= 0 && rs.rampState < RAMP_STATE_NAMES.length)
       ? RAMP_STATE_NAMES[rs.rampState]
       : String(rs.rampState);
@@ -798,7 +729,7 @@ async function pollRamp() {
       coastCur.textContent = curRatio.toFixed(3);
     }
     const coastModel = document.getElementById('rsCoastModel');
-    if (coastModel) coastModel.textContent = 'base=' + rs.coastBase.toFixed(3) + '  slope=' + rs.coastSlope.toFixed(3) + '/100°C';
+    if (coastModel) coastModel.textContent = 'base=' + rs.coastBase.toFixed(3) + '  slope=' + rs.coastSlope.toFixed(3) + '/100\u00B0C';
 
     const ageEl = document.getElementById('rsAge');
     if (ageEl) {
@@ -809,7 +740,6 @@ async function pollRamp() {
     const soakEl = document.getElementById('rsSoakRemain');
     if (soakEl) soakEl.textContent = rs.rampState === 5 ? Math.floor(rs.soakRemainS/60) + ':' + String(rs.soakRemainS%60).padStart(2,'0') + ' remaining' : '--';
 
-    // Learned steps table
     const tbody = document.getElementById('learnedBody');
     if (tbody) {
       tbody.innerHTML = '';
@@ -824,7 +754,6 @@ async function pollRamp() {
           tbody.appendChild(tr);
         });
       }
-      // Fill blanks for remaining steps if needed
       for (let i = rs.learnedCount; i < rs.stepCount - 1; i++) {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td style="color:#555">${i+1}</td>` + `<td colspan="4" style="color:#555;text-align:right">--</td>`;
@@ -850,20 +779,6 @@ document.getElementById('cfgForm').addEventListener('submit', async e => {
   alert('Saved!'); poll();
 });
 
-// ── Calibration form ──────────────────────────────────────────────────────────
-document.getElementById('calForm').addEventListener('submit', async e => {
-  e.preventDefault();
-  try {
-    const r = await fetch('/calibrate', {method:'POST', body: new URLSearchParams(new FormData(e.target))});
-    if (!r.ok) throw new Error(await r.text());
-    const data = await r.json();
-    document.getElementById('calResult').textContent = 'Calibrated uV/\u00B0C = ' + data.uvPerC.toFixed(4) + ', Offset = ' + data.offset.toFixed(4);
-    poll();
-  } catch(err) {
-    document.getElementById('calResult').textContent = 'Calibration failed: ' + err;
-  }
-});
-
 // ── WiFi form ─────────────────────────────────────────────────────────────────
 document.getElementById('wifiForm').addEventListener('submit', async e => {
   e.preventDefault();
@@ -872,16 +787,6 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-async function clearCalibration() {
-  try {
-    const r = await fetch('/calibrate/clear', {method:'POST'});
-    if (!r.ok) throw new Error(await r.text());
-    document.getElementById('calResult').textContent = 'Calibration cleared';
-    document.getElementById('calForm').reset();
-    poll();
-  } catch(err) { document.getElementById('calResult').textContent = 'Clear failed: ' + err; }
-}
-
 async function changeAuth() {
   const user = document.getElementById('authUser').value.trim();
   const pass = document.getElementById('authPass').value.trim();
@@ -916,11 +821,6 @@ function setManual(action) {
     .then(() => poll())
     .catch(e => console.warn('manual error', e));
 }
-
-function updateCalMode(val) {
-  const el = document.getElementById('calInputs');
-  if (el) el.style.display = (val == '2') ? 'block' : 'none';
-}
 </script>
 
 <!-- ── GPIO / Pin Debug Panel ─────────────────────────────────────── -->
@@ -934,38 +834,55 @@ function updateCalMode(val) {
 
       <!-- Input pins -->
       <div class="pin-cell" id="pc-btnUp">
-        <div class="pin-label">BTN UP &nbsp;<span class="pin-num">GPIO6</span></div>
+        <div class="pin-label">BTN UP &nbsp;<span class="pin-num">GPIO5</span></div>
         <div class="pin-val" id="pv-btnUp">--</div>
         <div class="pin-phase" id="pp-btnUp">--</div>
       </div>
       <div class="pin-cell" id="pc-btnDn">
-        <div class="pin-label">BTN DN &nbsp;<span class="pin-num">GPIO4</span></div>
+        <div class="pin-label">BTN DN &nbsp;<span class="pin-num">GPIO7</span></div>
         <div class="pin-val" id="pv-btnDn">--</div>
         <div class="pin-phase" id="pp-btnDn">--</div>
       </div>
       <div class="pin-cell" id="pc-btnCtr">
-        <div class="pin-label">BTN CTR &nbsp;<span class="pin-num">GPIO5</span></div>
+        <div class="pin-label">BTN CTR &nbsp;<span class="pin-num">GPIO6</span></div>
         <div class="pin-val" id="pv-btnCtr">--</div>
         <div class="pin-phase" id="pp-btnCtr">--</div>
       </div>
 
       <!-- Output pin -->
       <div class="pin-cell" id="pc-mosfet">
-        <div class="pin-label">MOSFET &nbsp;<span class="pin-num">GPIO3</span></div>
+        <div class="pin-label">MOSFET &nbsp;<span class="pin-num">GPIO0</span></div>
         <div class="pin-val" id="pv-mosfet">--</div>
         <div class="pin-phase" id="pp-mosfet" style="font-size:.7rem;color:#aaa;">OUTPUT</div>
       </div>
 
-      <!-- I2C (info only, not read) -->
+      <!-- I2C (OLED only) -->
       <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">I2C SDA &nbsp;<span class="pin-num">GPIO8</span></div>
+        <div class="pin-label">I2C SDA &nbsp;<span class="pin-num">GPIO10</span></div>
         <div class="pin-val" style="color:#555;">I2C</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED/INA219</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
       </div>
       <div class="pin-cell" style="opacity:.55;">
-        <div class="pin-label">I2C SCL &nbsp;<span class="pin-num">GPIO9</span></div>
+        <div class="pin-label">I2C SCL &nbsp;<span class="pin-num">GPIO8</span></div>
         <div class="pin-val" style="color:#555;">I2C</div>
-        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED/INA219</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">OLED</div>
+      </div>
+
+      <!-- MAX6675 SPI (info only) -->
+      <div class="pin-cell" style="opacity:.55;">
+        <div class="pin-label">MAX6675 SCK &nbsp;<span class="pin-num">GPIO4</span></div>
+        <div class="pin-val" style="color:#555;">SPI</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
+      </div>
+      <div class="pin-cell" style="opacity:.55;">
+        <div class="pin-label">MAX6675 CS &nbsp;<span class="pin-num">GPIO3</span></div>
+        <div class="pin-val" style="color:#555;">SPI</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
+      </div>
+      <div class="pin-cell" style="opacity:.55;">
+        <div class="pin-label">MAX6675 SO &nbsp;<span class="pin-num">GPIO2</span></div>
+        <div class="pin-val" style="color:#555;">SPI</div>
+        <div class="pin-phase" style="font-size:.7rem;color:#555;">Thermocouple</div>
       </div>
     </div>
 
@@ -1017,15 +934,11 @@ function updateCalMode(val) {
     try {
       const p = await fetch('/pinstatus').then(r => r.json());
 
-      // Buttons (INPUT_PULLUP: pressed = true)
       setPinCell('btnUp',  p.btnUp,  p.btnUp  ? 'PRESSED' : 'OPEN', p.btnUpPhase,  'pressed');
       setPinCell('btnDn',  p.btnDn,  p.btnDn  ? 'PRESSED' : 'OPEN', p.btnDnPhase,  'pressed');
       setPinCell('btnCtr', p.btnCtr, p.btnCtr ? 'PRESSED' : 'OPEN', p.btnCtrPhase, 'pressed');
-
-      // MOSFET output
       setPinCell('mosfet', p.outputOn, p.outputOn ? 'HIGH / ON' : 'LOW / OFF', 'OUTPUT', 'active');
 
-      // Flags
       const fOut  = document.getElementById('flag-outputOn');
       const fStop = document.getElementById('flag-stop');
       const fMode = document.getElementById('flag-mode');
