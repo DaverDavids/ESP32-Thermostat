@@ -34,8 +34,8 @@ const uint8_t MAX_SCK =  4;
 const uint8_t MAX_CS =  3;
 const uint8_t MAX_SO =  2;
 
-// outputOn=true  -> PIN_MOSFET LOW  (active-low load)
-// outputOn=false -> PIN_MOSFET HIGH
+// outputOn=true  -> PIN_MOSFET HIGH
+// outputOn=false -> PIN_MOSFET LOW
 #define MOSFET_WRITE(on) digitalWrite(PIN_MOSFET, (on) ? HIGH : LOW)
 
 // ─── OLED ─────────────────────────────────────────────────────────────────────
@@ -106,19 +106,19 @@ struct RampProfile {
   bool    complete;                    // was this profile learned on a full run?
 };
 
-// Default active profile (Stage 2 boot defaults; Stage 4 will persist but today we boot with defaults)
+// Default active profile
 RampProfile activeProfile = {
   "default",
   {150.0f, 280.0f, 380.0f, 440.0f, 470.0f, 490.0f, 500.0f},
   7,
   30.0f,
   2.0f,
-  0.40f,   // coastBase: initial guess, will be updated each step
-  0.03f,   // coastSlope: ratio drops ~0.03 per 100°C
+  0.40f,
+  0.03f,
   false
 };
 
-// RampState machine (Stage 2)
+// RampState machine
 enum RampState {
   RS_IDLE            = 0,
   RS_HEATING         = 1,
@@ -129,31 +129,28 @@ enum RampState {
   RS_DONE            = 6
 };
 
-// Per-run learned data (arrays accumulate during a run)
-// Indexed by step number (0 to stepCount-2)
 #define MAX_LEARNED_STEPS (RAMP_MAX_STEPS - 1)
 
-float learnedFireStartTemp[MAX_LEARNED_STEPS];  // probe temp when element turned ON
-float learnedCutoffTemp[MAX_LEARNED_STEPS];     // probe temp when element turned OFF
-float learnedPeakTemp[MAX_LEARNED_STEPS];       // highest probe temp after cutoff
-float learnedCoastRatio[MAX_LEARNED_STEPS];     // (peak-cutoff)/(cutoff-fireStart)
-uint8_t learnedCount = 0;                       // how many steps have full data
+float learnedFireStartTemp[MAX_LEARNED_STEPS];
+float learnedCutoffTemp[MAX_LEARNED_STEPS];
+float learnedPeakTemp[MAX_LEARNED_STEPS];
+float learnedCoastRatio[MAX_LEARNED_STEPS];
+uint8_t learnedCount = 0;
 
 // Ramp working variables
 RampState rampState    = RS_IDLE;
-uint8_t   rampStep     = 0;        // current step index into activeProfile.stepTargets
+uint8_t   rampStep     = 0;
 float     rampFireStartTemp = 0.0f;
 float     rampCutoffTemp    = 0.0f;
-float     rampPeakTemp      = 0.0f;  // tracks max temp seen during COASTING
-float     rampOvershootAmt  = 0.0f;  // °C above step target at peak (0 if none)
-unsigned long rampStateEnteredMs = 0; // millis() when current state began
+float     rampPeakTemp      = 0.0f;
+float     rampOvershootAmt  = 0.0f;
+unsigned long rampStateEnteredMs = 0;
 unsigned long finalSoakStartMs   = 0;
-// Stability detection: sliding window over last 30s = 60 samples at 2Hz
 #define STABILITY_WINDOW 60
 float stabilityBuf[STABILITY_WINDOW];
 uint16_t stabilityIdx   = 0;
-uint16_t stabilityFilled = 0;  // 0 until buffer has at least STABILITY_WINDOW entries
-uint8_t coastingDropCount = 0;  // consecutive samples below peak threshold
+uint16_t stabilityFilled = 0;
+uint8_t coastingDropCount = 0;
 
 // Helpers (forward declarations)
 float effectiveCoastRatio(float tempC);
@@ -178,7 +175,7 @@ void refitCoastModel() {
     sumXY += x * y; sumX2 += x * x;
   }
   float denom = n * sumX2 - sumX * sumX;
-  if (fabsf(denom) < 1e-6f) return;  // degenerate
+  if (fabsf(denom) < 1e-6f) return;
   float slopePerC = (n * sumXY - sumX * sumY) / denom;
   float intercept  = (sumY - slopePerC * sumX) / n;
   activeProfile.coastSlope = -slopePerC * 100.0f;
@@ -263,7 +260,7 @@ bool profileFromJson(const String& json, RampProfile& p) {
   return true;
 }
 
-extern bool spiffsOk;  // forward ref – defined in globals below
+extern bool spiffsOk;
 
 void ensureProfileDir() {
   if (!spiffsOk) return;
@@ -280,7 +277,6 @@ bool     runActive  = false;
 unsigned long runStartMs = 0;
 File     runLogFile;
 
-// Short RAM cache: 64 most-recent samples for fast /log?since= serving
 #define CACHE_SIZE 64
 struct CacheSample {
   uint32_t t_s;
@@ -431,8 +427,6 @@ void setup() {
 
   Wire.begin(PIN_SDA, PIN_SCL);
 
-  // MAX6675 uses software SPI via constructor; no explicit begin() needed.
-  // Allow sensor to stabilize
   delay(500);
   DBGLN("MAX6675 ready");
 
@@ -448,7 +442,6 @@ void setup() {
     DBGLN("OLED ready");
   }
 
-  // SPIFFS
   spiffsOk = SPIFFS.begin(true);
   if (spiffsOk) { DBGLN("SPIFFS ready"); ensureProfileDir(); }
   else          { DBGLN("SPIFFS failed - logging to RAM cache only"); }
@@ -505,7 +498,6 @@ void loop() {
     }
     DBG("T: "); DBGLN(currentTemp);
 
-    // history ring buffer
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
@@ -632,13 +624,16 @@ void updateDisplay() {
 void updateButtons() {
   unsigned long now = millis();
 
-  auto registerPress = [&]() {
+  // Register a center-button short press toward the e-stop counter.
+  // Must be called on every short press regardless of mode/latch state.
+  auto registerEstopPress = [&]() {
     if (now - estopWindowStart > ESTOP_WINDOW_MS) {
       estopPressCount  = 1;
       estopWindowStart = now;
     } else {
       estopPressCount++;
     }
+    DBG("E-stop press count: "); DBGLN(estopPressCount);
     if (estopPressCount >= ESTOP_PRESSES) {
       estopPressCount = 0;
       if (stopLatched) {
@@ -647,7 +642,9 @@ void updateButtons() {
       } else {
         stopLatched  = true;
         modeRunning  = false;
+        runActive    = false;
         applyHeater(false);
+        closeRunLog();
         DBGLN("E-stop LATCHED");
       }
     }
@@ -663,20 +660,37 @@ void updateButtons() {
 
       case BTN_PENDING:
         if (!low) {
+          // Button released — short press confirmed
           btns[i].phase = BTN_IDLE;
           if (i == 2) {
-            if (stopLatched) {
-              registerPress();
-            } else {
-              bool handled = false;
-              if (modeRunning) {
+            // ── FIX: always register every short press toward e-stop counter ──
+            registerEstopPress();
+
+            // If e-stop just triggered above, skip mode/heater logic
+            if (estopPressCount == 0 && stopLatched) break;
+
+            // Normal (non-latched) short press action
+            if (!stopLatched) {
+              if (selectedMode == MODE_MANUAL) {
+                // ── FIX: in manual mode, toggle heater on/off ──
+                if (modeRunning) {
+                  applyHeater(!outputOn);
+                  DBG("Manual heater toggled: "); DBGLN(outputOn ? "ON" : "OFF");
+                } else {
+                  // First press starts manual mode with heater off
+                  modeRunning = true;
+                  applyHeater(false);
+                  DBGLN("Manual mode started");
+                }
+              } else if (modeRunning) {
+                // Bang-bang or ramp: short press stops the run
                 modeRunning = false;
                 applyHeater(false);
                 runActive   = false;
                 closeRunLog();
                 DBGLN("Mode stopped");
-                handled = true;
               } else {
+                // Bang-bang or ramp: short press starts the run
                 modeRunning = true;
                 if (selectedMode == MODE_AUTO_RAMP) {
                   rampState        = RS_IDLE;
@@ -703,9 +717,7 @@ void updateButtons() {
                   openRunLog();
                 }
                 DBGLN("Mode started");
-                handled = true;
               }
-              if (!handled) registerPress();
             }
           }
         } else if (now - btns[i].pendingSince >= (i == 2 ? RAMP_DELAY_MS : DEBOUNCE_MS)) {
@@ -753,7 +765,6 @@ void updateButtons() {
 float rawTempC() {
   float candidate = thermocouple.readCelsius();
 
-  // MAX6675 returns NAN or 0 on open-circuit / fault
   if (isnan(candidate) || candidate == 0.0f) {
     DBGLN("MAX6675 read fault");
     return isnan(lastGoodTemp) ? 20.0f : lastGoodTemp;
@@ -794,7 +805,7 @@ void controlLoop() {
   else if (currentTemp > setpoint + hysteresis) applyHeater(false);
 }
 
-// ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
+// ─── Ramp control loop ───────────────────────────────────────────────────────
 void rampControlLoop() {
   if (rampStep >= activeProfile.stepCount) {
     rampStep = activeProfile.stepCount > 0 ? activeProfile.stepCount - 1 : 0;
@@ -1014,7 +1025,6 @@ void loadPrefs() {
   savedPSK      = prefs.getString("psk",  MYPSK);
   webUser = prefs.getString("wuser", "admin");
   webPass = prefs.getString("wpass", "thermostat");
-  // Active ramp profile (Stage 4)
   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
   activeProfile.name[31] = '\0';
   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
@@ -1043,7 +1053,6 @@ void savePrefs() {
   prefs.putString("psk",   savedPSK);
   prefs.putString("wuser", webUser);
   prefs.putString("wpass", webPass);
-  // Active ramp profile (Stage 4)
   prefs.putString("rp_name",     activeProfile.name);
   prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
   prefs.putFloat ("rp_stab",     activeProfile.stabilityThreshC);
@@ -1090,7 +1099,6 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
-  // ── Pin/GPIO debug status ─────────────────────────────────────────────────
   server.on("/pinstatus", HTTP_GET, []() {
     bool btnUp  = !digitalRead(PIN_BTN_UP);
     bool btnDn  = !digitalRead(PIN_BTN_DN);
@@ -1123,7 +1131,6 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
-  // ── Ramp status (Stage 2) ───────────────────────────────────────────────
   server.on("/rampstatus", HTTP_GET, []() {
     uint8_t safeStep = min(rampStep, (uint8_t)(activeProfile.stepCount - 1));
 
