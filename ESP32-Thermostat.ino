@@ -8,7 +8,7 @@
 #include <DNSServer.h>
 #include <Wire.h>
 #include <SPIFFS.h>
-#include <Adafruit_INA219.h>
+#include <max6675.h>
 #include <Adafruit_SSD1306.h>
 #include "html.h"
 #include <Secrets.h>
@@ -51,11 +51,10 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (~37Hz)
+const uint32_t FAST_SAMPLE_MS = 250;  // MAX6675 min conversion time ~170ms; use 250ms
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
 const float    OUTLIER_MAX_JUMP = 150.0f;
-const float    SHUNT_MIN_MV     =  -5.0f;
 uint8_t        jumpRejectCount  = 0;
 const uint8_t  JUMP_REJECT_MAX  = 10;
 
@@ -275,10 +274,6 @@ void ensureProfileDir() {
 }
 
 // ─── SPIFFS run log ───────────────────────────────────────────────────────────
-// Written at 2 Hz while a run is active (runMode != BANG_BANG with auto active,
-// OR bang-bang auto active). Columns:
-//   t_s, tempC, setpoint, output, mode, ramp_state, step_idx, coast_ratio_est
-// ramp_state and step_idx are placeholders (0) until Stage 2.
 static const char* LOG_PATH = "/runlog.csv";
 bool     spiffsOk   = false;
 bool     runActive  = false;
@@ -292,8 +287,8 @@ struct CacheSample {
   float    tC;
   float    sp;
   uint8_t  output;
-  uint8_t  mode;         // RunMode value
-  uint8_t  ramp_state;   // 0 = not ramp (Stage 2 will populate)
+  uint8_t  mode;
+  uint8_t  ramp_state;
   uint8_t  step_idx;
   float    coast_ratio;
 };
@@ -315,7 +310,6 @@ void closeRunLog() {
 
 void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
                   uint8_t mode, uint8_t ramp_state, uint8_t step_idx, float coast_ratio) {
-  // Always update RAM cache
   sampleCache[cacheHead % CACHE_SIZE] = { t_s, tC, sp, output, mode, ramp_state, step_idx, coast_ratio };
   cacheHead++;
   if (cacheCount < CACHE_SIZE) cacheCount++;
@@ -338,35 +332,23 @@ bool             prefsDirty = false;
 unsigned long    prefsDirtyMs = 0;
 WebServer        server(80);
 DNSServer        dns;
-Adafruit_INA219  ina219;
+MAX6675          thermocouple(MAX_SCK, MAX_CS, MAX_SO);
 Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
-float    lastShuntMV =   0.0f;
 float    lastGoodTemp   = NAN;
 bool     outputOn       = false;
 bool     apMode         = false;
 
 float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
-int      probeType       =  0;
-float    customUvPerC    =  0.0f;
-float    cjcOffset       = -12.0f;
-float    calMv1          =  0.0f;
-float    calTemp1        =  0.0f;
-float    calMv2          =  0.0f;
-float    calTemp2        =  0.0f;
-float    calCjc1         =  0.0f;
-float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
 String   savedPSK        = MYPSK;
 
 // ─── Web auth ─────────────────────────────────────────────────────────────────
 String webUser = "admin";
 String webPass = "thermostat";
-
-const float PROBE_UV_PER_C[] = { 41.0f, 52.0f };
 
 #define HIST_SIZE 720
 float    tempHistory[HIST_SIZE];
@@ -449,8 +431,10 @@ void setup() {
 
   Wire.begin(PIN_SDA, PIN_SCL);
 
-  if (!ina219.begin()) { DBGLN("INA219 not found"); }
-  else { ina219.setCalibration_16V_400mA(); DBGLN("INA219 ready"); }
+  // MAX6675 uses software SPI via constructor; no explicit begin() needed.
+  // Allow sensor to stabilize
+  delay(500);
+  DBGLN("MAX6675 ready");
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     DBGLN("SSD1306 not found");
@@ -518,11 +502,10 @@ void loop() {
     lastReport = now;
     if (medCount > 0) {
       currentTemp = medianOf(medBuf, medCount);
-      lastShuntMV = ina219.getShuntVoltage_mV();
     }
     DBG("T: "); DBGLN(currentTemp);
 
-    // history ring buffer (unchanged)
+    // history ring buffer
     tempHistory[histHead] = currentTemp;
     histHead = (histHead + 1) % HIST_SIZE;
     if (histCount < HIST_SIZE) histCount++;
@@ -768,19 +751,16 @@ void updateButtons() {
 
 // ─── Temperature ──────────────────────────────────────────────────────────────
 float rawTempC() {
-  float smV   = ina219.getShuntVoltage_mV();
-  float cjc_C = temperatureRead() + cjcOffset;
-  float uv_per_c = (customUvPerC > 0.0f)
-                  ? customUvPerC
-                  : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
-  float cjc_mV   = (cjc_C * uv_per_c) / 1000.0f;
-  float total_mV = smV + cjc_mV;
-  float candidate = (total_mV * 1000.0f / uv_per_c) + probeOffset;
+  float candidate = thermocouple.readCelsius();
 
-  if (smV < SHUNT_MIN_MV) {
-    DBG("Dropout smV="); DBGLN(smV);
-    return isnan(lastGoodTemp) ? cjc_C : lastGoodTemp;
+  // MAX6675 returns NAN or 0 on open-circuit / fault
+  if (isnan(candidate) || candidate == 0.0f) {
+    DBGLN("MAX6675 read fault");
+    return isnan(lastGoodTemp) ? 20.0f : lastGoodTemp;
   }
+
+  candidate += probeOffset;
+
   if (!isnan(lastGoodTemp) && fabsf(candidate - lastGoodTemp) > OUTLIER_MAX_JUMP) {
     DBG("Jump reject: "); DBGLN(candidate);
     jumpRejectCount++;
@@ -791,8 +771,8 @@ float rawTempC() {
     }
     return isnan(lastGoodTemp) ? candidate : lastGoodTemp;
   }
+
   jumpRejectCount = 0;
-  lastShuntMV  = smV;
   lastGoodTemp = candidate;
   return candidate;
 }
@@ -815,7 +795,6 @@ void controlLoop() {
 }
 
 // ─── Ramp control loop (Stage 2) ───────────────────────────────────────────
-// This is called at ~2Hz when autoramp is active and replaces controlLoop
 void rampControlLoop() {
   if (rampStep >= activeProfile.stepCount) {
     rampStep = activeProfile.stepCount > 0 ? activeProfile.stepCount - 1 : 0;
@@ -1031,17 +1010,8 @@ void loadPrefs() {
   setpoint      = prefs.getFloat ("sp",    500.0);
   hysteresis    = prefs.getFloat ("hyst",    5.0);
   probeOffset   = prefs.getFloat ("off",     0.0);
-  probeType     = prefs.getInt   ("ptype",     0);
-  customUvPerC  = prefs.getFloat ("uvpc",    0.0);
-  calMv1        = prefs.getFloat ("mv1",     0.0);
-  calTemp1      = prefs.getFloat ("t1",      0.0);
-  calMv2        = prefs.getFloat ("mv2",     0.0);
-  calTemp2      = prefs.getFloat ("t2",      0.0);
-  calCjc1       = prefs.getFloat ("cjc1",    0.0);
-  calCjc2       = prefs.getFloat ("cjc2",    0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",  MYPSK);
-  cjcOffset     = prefs.getFloat ("cjco", -12.0);
   webUser = prefs.getString("wuser", "admin");
   webPass = prefs.getString("wpass", "thermostat");
   // Active ramp profile (Stage 4)
@@ -1069,17 +1039,8 @@ void savePrefs() {
   prefs.putFloat ("sp",    setpoint);
   prefs.putFloat ("hyst",  hysteresis);
   prefs.putFloat ("off",   probeOffset);
-  prefs.putInt   ("ptype", probeType);
-  prefs.putFloat ("uvpc",  customUvPerC);
-  prefs.putFloat ("cjc1",  calCjc1);
-  prefs.putFloat ("cjc2",  calCjc2);
-  prefs.putFloat ("mv1",   calMv1);
-  prefs.putFloat ("t1",    calTemp1);
-  prefs.putFloat ("mv2",   calMv2);
-  prefs.putFloat ("t2",    calTemp2);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
-  prefs.putFloat ("cjco",  cjcOffset);
   prefs.putString("wuser", webUser);
   prefs.putString("wpass", webPass);
   // Active ramp profile (Stage 4)
@@ -1115,12 +1076,6 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
-    float uvPerC = (customUvPerC > 0.0f)
-                 ? customUvPerC
-                 : PROBE_UV_PER_C[constrain(probeType, 0, 1)];
-    float cjc_C   = temperatureRead() + cjcOffset;
-    float cjc_mV  = (cjc_C * uvPerC) / 1000.0f;
-    float totalMV = lastShuntMV + cjc_mV;
     String j = "{\"temp\":"         + String(currentTemp,  1)
              + ",\"setpoint\":"     + String(setpoint,      1)
              + ",\"output\":"       + String(outputOn ? 1 : 0)
@@ -1131,19 +1086,6 @@ void setupRoutes() {
              + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
              + ",\"hysteresis\":"   + String(hysteresis,    1)
              + ",\"offset\":"       + String(probeOffset,   1)
-             + ",\"probeType\":"    + String(probeType)
-             + ",\"customUvPerC\":" + String(customUvPerC,  4)
-             + ",\"shuntMV\":"      + String(lastShuntMV,   4)
-             + ",\"totalMV\":"      + String(totalMV,       4)
-             + ",\"cjcC\":"         + String(cjc_C,         2)
-             + ",\"uvPerC\":"       + String(uvPerC,        4)
-             + ",\"cjcOffset\":"    + String(cjcOffset,     1)
-             + ",\"calMv1\":"       + String(calMv1,        4)
-             + ",\"calTemp1\":"     + String(calTemp1,      1)
-             + ",\"calCjc1\":"      + String(calCjc1,       2)
-             + ",\"calMv2\":"       + String(calMv2,        4)
-             + ",\"calTemp2\":"     + String(calTemp2,      1)
-             + ",\"calCjc2\":"      + String(calCjc2,       2)
              + "}";
     server.send(200, "application/json", j);
   });
@@ -1174,6 +1116,9 @@ void setupRoutes() {
       + ",\"pinBtnCtr\":"    + String(PIN_BTN_CTR)
       + ",\"pinSDA\":"       + String(PIN_SDA)
       + ",\"pinSCL\":"       + String(PIN_SCL)
+      + ",\"maxSCK\":"       + String(MAX_SCK)
+      + ",\"maxCS\":"        + String(MAX_CS)
+      + ",\"maxSO\":"        + String(MAX_SO)
       + "}";
     server.send(200, "application/json", j);
   });
@@ -1182,7 +1127,6 @@ void setupRoutes() {
   server.on("/rampstatus", HTTP_GET, []() {
     uint8_t safeStep = min(rampStep, (uint8_t)(activeProfile.stepCount - 1));
 
-    // Build learned steps JSON array
     String learned = "[";
     for (uint8_t i = 0; i < learnedCount; i++) {
       if (i) learned += ",";
@@ -1196,7 +1140,6 @@ void setupRoutes() {
     }
     learned += "]";
 
-    // Current predicted peak (only meaningful in RS_HEATING)
     float rise = currentTemp - rampFireStartTemp;
     float predPeak = (rampState == RS_HEATING)
       ? currentTemp + rise * effectiveCoastRatio(activeProfile.stepTargets[safeStep])
@@ -1227,7 +1170,6 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
-  // /profile: read current active ramp profile
   server.on("/profile", HTTP_GET, []() {
     String steps = "[";
     for (uint8_t i = 0; i < activeProfile.stepCount; i++) {
@@ -1249,7 +1191,6 @@ void setupRoutes() {
 
   server.on("/profile", HTTP_POST, []() {
     if (!requireAuth()) return;
-    // Accept any subset of fields
     if (server.hasArg("name")) {
       strncpy(activeProfile.name, server.arg("name").c_str(), 31);
       activeProfile.name[31] = '\0';
@@ -1258,7 +1199,6 @@ void setupRoutes() {
     if (server.hasArg("stability")) activeProfile.stabilityThreshC = server.arg("stability").toFloat();
     if (server.hasArg("coastBase")) activeProfile.coastBase = server.arg("coastBase").toFloat();
     if (server.hasArg("coastSlope")) activeProfile.coastSlope = server.arg("coastSlope").toFloat();
-    // Step targets: comma-separated string, e.g. "150,300,420,470,490,500"
     if (server.hasArg("steps")) {
       String s = server.arg("steps");
       uint8_t n = 0;
@@ -1367,8 +1307,6 @@ void setupRoutes() {
     server.send(200, "application/json", "{\"deleted\":\"" + n + "\"}");
   });
 
-  // ── Run control ──────────────────────────────────────────────────────────────
-  // POST /run  body: mode=bangbang|autoramp&action=start|stop
   server.on("/run", HTTP_POST, []() {
     if (!requireAuth()) return;
     String modeStr   = server.arg("mode");
@@ -1411,17 +1349,12 @@ void setupRoutes() {
     server.send(200, "text/plain", "OK");
   });
 
-  // ── Incremental log (since T seconds) ────────────────────────────────────────
-  // GET /log?since=N  -> CSV rows where t_s > N
-  // If no since param, returns all cached rows.
-  // Tries SPIFFS first; falls back to RAM cache.
   server.on("/log", HTTP_GET, []() {
     uint32_t since = 0;
     if (server.hasArg("since")) since = (uint32_t)server.arg("since").toInt();
 
     if (runLogFile) runLogFile.flush();
 
-    // Try SPIFFS
     if (spiffsOk && SPIFFS.exists(LOG_PATH)) {
       File f = SPIFFS.open(LOG_PATH, FILE_READ);
       if (f) {
@@ -1434,20 +1367,18 @@ void setupRoutes() {
         bool firstLine = true;
         while (f.available()) {
           line = f.readStringUntil('\n');
-          if (firstLine) { firstLine = false; continue; } // skip file header
+          if (firstLine) { firstLine = false; continue; }
           if (!line.length()) continue;
-          // parse t_s (first field)
           int comma = line.indexOf(',');
           if (comma < 0) continue;
           uint32_t ts = (uint32_t)line.substring(0, comma).toInt();
           if (ts > since) server.sendContent(line + "\n");
         }
         f.close();
-        server.sendContent(""); // end chunked
+        server.sendContent("");
         return;
       }
     }
-    // RAM cache fallback
     String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
     uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
     uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
@@ -1463,8 +1394,6 @@ void setupRoutes() {
     server.send(200, "text/plain", out);
   });
 
-  // ── Full log download ─────────────────────────────────────────────────────────
-  // GET /log/full  -> entire runlog.csv as file download
   server.on("/log/full", HTTP_GET, []() {
     if (runLogFile) runLogFile.flush();
 
@@ -1484,7 +1413,6 @@ void setupRoutes() {
         return;
       }
     }
-    // Fallback: serve RAM cache as CSV
     String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
     uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
     uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
@@ -1497,40 +1425,6 @@ void setupRoutes() {
     }
     server.sendHeader("Content-Disposition", "attachment; filename=\"runlog_cache.csv\"");
     server.send(200, "text/csv", out);
-  });
-
-  server.on("/calibrate", HTTP_POST, []() {
-    if (!requireAuth()) return;
-    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
-        !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
-      server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
-      return;
-    }
-    float mv1   = server.arg("mv1").toFloat();
-    float temp1 = server.arg("temp1").toFloat();
-    float cjc1  = server.arg("cjc1").toFloat();
-    float mv2   = server.arg("mv2").toFloat();
-    float cjc2  = server.arg("cjc2").toFloat();
-    float temp2 = server.arg("temp2").toFloat();
-    if (temp2 <= temp1) { server.send(400, "text/plain", "temp2 must be > temp1"); return; }
-    calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
-    calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
-    float dMv   = mv2 - mv1;
-    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);
-    customUvPerC = (dMv * 1000.0f) / dTemp;
-    probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
-    savePrefs();
-    server.send(200, "application/json",
-      String("{\"uvPerC\":") + String(customUvPerC, 4)
-      + ",\"offset\":" + String(probeOffset, 4) + "}");
-  });
-
-  server.on("/calibrate/clear", HTTP_POST, []() {
-    if (!requireAuth()) return;
-    customUvPerC = 0.0f;
-    probeOffset  = 0.0f;
-    savePrefs();
-    server.send(200, "application/json", "{\"status\":\"cleared\"}");
   });
 
   server.on("/history", HTTP_GET, []() {
@@ -1549,8 +1443,6 @@ void setupRoutes() {
     if (server.hasArg("sp"))    setpoint    = server.arg("sp").toFloat();
     if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
     if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
-    if (server.hasArg("ptype")) probeType   = server.arg("ptype").toInt();
-    if (server.hasArg("cjco"))  cjcOffset   = server.arg("cjco").toFloat();
     savePrefs();
     server.send(200, "text/plain", "OK");
   });
