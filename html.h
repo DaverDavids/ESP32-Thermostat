@@ -28,7 +28,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   .row-3{grid-template-columns:1fr 1fr 1fr}
   .row-1{grid-template-columns:1fr}
 
-  /* stack single-column on narrow screens */
   @media(max-width:600px){
     .row-2,.row-3{grid-template-columns:1fr}
   }
@@ -205,7 +204,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
-<!-- ── Run Summary (full width, shown after ramp completes) ──────────────── -->
+<!-- ── Run Summary ─────────────────────────────────────────────────────────── -->
 <div class="row row-1">
   <div class="card" id="runSummaryPanel" style="display:none;">
     <h2>&#x1F3C1; Run Summary</h2>
@@ -227,7 +226,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
-<!-- ── Data Log (full width) ─────────────────────────────────────────────── -->
+<!-- ── Data Log ─────────────────────────────────────────────────────────────── -->
 <div class="row row-1">
   <div class="card">
     <h2>&#x1F4BE; Data Log</h2>
@@ -277,7 +276,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
-<!-- bottom spacer -->
 <div style="height:.75rem"></div>
 
 <script>
@@ -414,13 +412,23 @@ async function exportCSV() {
   URL.revokeObjectURL(url);
 }
 
-// ── Run control ───────────────────────────────────────────────────────────────
-document.getElementById('runModeSelect').addEventListener('change', function() {
-  const isRamp = this.value === 'autoramp';
+// ── Panel visibility ───────────────────────────────────────────────────────────────
+//
+// Single source of truth: show/hide ramp panels based on the dropdown value.
+// Called from both the dropdown's change handler and from poll().
+// poll() must NOT override panel visibility if a run is not active — the
+// user may have already switched the dropdown to autoramp before starting.
+function syncPanelVisibility() {
+  const isRamp = document.getElementById('runModeSelect').value === 'autoramp';
   document.getElementById('rampPanel').style.display       = isRamp ? 'block' : 'none';
   document.getElementById('profilePanel').style.display    = isRamp ? 'block' : 'none';
   document.getElementById('profileLibPanel').style.display = isRamp ? 'block' : 'none';
-  if (isRamp) refreshProfileList();
+}
+
+// ── Run control ───────────────────────────────────────────────────────────────
+document.getElementById('runModeSelect').addEventListener('change', function() {
+  syncPanelVisibility();
+  if (this.value === 'autoramp') refreshProfileList();
 });
 
 async function loadProfileFromDevice() {
@@ -532,17 +540,34 @@ async function startRun() {
   if (rows.length > 0) {
     if (!confirm('Starting a new run will clear ' + rows.length + ' stored log rows from the previous run. Continue?')) return;
   }
+  // Reset UI run-tracking state BEFORE the fetch so a cancelled confirm
+  // doesn't leave wasRunActive in a stuck state.
+  wasRunActive    = false;
+  wasSelectedMode = ['manual','bangbang','autoramp'].indexOf(mode);
+
   document.getElementById('runSummaryPanel').style.display = 'none';
   document.getElementById('summaryBody').innerHTML = '';
   runChartStepTargets = [];
   runChartCurrentStep = 0;
   await dbClear();
   drawRunChart();
-  await fetch('/run', {method:'POST', body: new URLSearchParams({mode: mode, action:'start'})});
+  try {
+    const r = await fetch('/run', {method:'POST', body: new URLSearchParams({mode, action:'start'})});
+    if (!r.ok) {
+      const msg = await r.text();
+      document.getElementById('runStatus').textContent = 'Start failed: ' + msg;
+      document.getElementById('runStatus').style.color = '#e74c3c';
+    }
+  } catch(e) {
+    document.getElementById('runStatus').textContent = 'Start failed: ' + e;
+    document.getElementById('runStatus').style.color = '#e74c3c';
+  }
 }
 
 async function stopRun() {
-  await fetch('/run', {method:'POST', body: new URLSearchParams({action:'stop'})});
+  try {
+    await fetch('/run', {method:'POST', body: new URLSearchParams({action:'stop'})});
+  } catch(e) { console.warn('stopRun error', e); }
 }
 
 // ── Run chart ─────────────────────────────────────────────────────────────────
@@ -673,15 +698,30 @@ async function showRunSummary(learnedSteps, stepTargets) {
   panel.style.display = 'block';
 }
 
-let wasRunActive = false;
+// ── Poll ─────────────────────────────────────────────────────────────────────
+//
+// FIX 1: poll() no longer unconditionally overwrites runModeSelect.
+//         It only syncs the dropdown when a run is actually active — so
+//         the user can freely change the mode selector between runs without
+//         poll() snapping it back to whatever the device last reported.
+//
+// FIX 2: syncPanelVisibility() is called based on the dropdown value,
+//         not on st.selectedMode. This means ramp panels are visible
+//         whenever the user has autoramp selected, even before Start is hit.
+//
+// FIX 3: wasRunActive is explicitly set to false in the run-just-ended
+//         branch (after we fire the summary fetch), so subsequent polls
+//         stop seeing "run just ended" and the Start button is usable again.
+
+let wasRunActive    = false;
 let wasSelectedMode = 0;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
 
 async function poll() {
   try {
-    const [st, hist] = await Promise.all([
+    const [st] = await Promise.all([
       fetch('/status').then(r=>r.json()),
-      fetch('/history').then(r=>r.json())
+      fetch('/history').then(r=>r.json())   // keep fetching history for future use
     ]);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
@@ -702,48 +742,52 @@ async function poll() {
     }
 
     // E-stop panel
-    const stopBtn = document.getElementById('btnStop');
+    const stopBtn    = document.getElementById('btnStop');
     const stopStatus = document.getElementById('stopStatus');
     if (st.stopLatched) {
-      stopBtn.textContent = '\u21BA RELEASE STOP';
+      stopBtn.textContent      = '\u21BA RELEASE STOP';
       stopBtn.style.background = '#f39c12';
-      stopStatus.textContent = 'E-STOP LATCHED - heater disabled';
-      stopStatus.style.color = '#e74c3c';
+      stopStatus.textContent   = 'E-STOP LATCHED - heater disabled';
+      stopStatus.style.color   = '#e74c3c';
     } else {
-      stopBtn.textContent = '\u26A0 STOP';
+      stopBtn.textContent      = '\u26A0 STOP';
       stopBtn.style.background = '#e74c3c';
-      stopStatus.textContent = 'Normal operation';
-      stopStatus.style.color = '#aaa';
+      stopStatus.textContent   = 'Normal operation';
+      stopStatus.style.color   = '#aaa';
     }
 
     // Manual mode controls visibility
     const manualControls = document.getElementById('manualControls');
     manualControls.style.display = (st.selectedMode === 0 && !st.stopLatched) ? 'flex' : 'none';
 
-    // Mode selector sync
-    const modeValues = ['manual', 'bangbang', 'autoramp'];
-    document.getElementById('runModeSelect').value = modeValues[st.selectedMode] || 'bangbang';
+    // FIX 1: Only sync the dropdown when a run is active (device is authoritative).
+    // When idle, leave the dropdown alone so the user can pre-select a mode.
+    if (st.runActive) {
+      const modeValues = ['manual', 'bangbang', 'autoramp'];
+      document.getElementById('runModeSelect').value = modeValues[st.selectedMode] || 'bangbang';
+    }
+
+    // FIX 2: Panel visibility is always driven by the dropdown, not st.runActive.
+    syncPanelVisibility();
 
     // Run status line
     const rsEl = document.getElementById('runStatus');
     if (st.runActive) {
-      const mLabel = modeNames[st.selectedMode];
+      const mLabel  = modeNames[st.selectedMode];
       const elapsed = st.runElapsed || 0;
-      const m = Math.floor(elapsed/60), s = elapsed%60;
+      const m = Math.floor(elapsed / 60), s = elapsed % 60;
       rsEl.textContent = '\u25CF Running \u2022 ' + mLabel +
-        ' \u2022 Elapsed: ' + m + ':' + String(s).padStart(2,'0');
+        ' \u2022 Elapsed: ' + m + ':' + String(s).padStart(2, '0');
       rsEl.style.color = '#2ecc71';
-
-      const isRamp = st.selectedMode === 2;
-      document.getElementById('rampPanel').style.display       = isRamp ? 'block' : 'none';
-      document.getElementById('profilePanel').style.display    = isRamp ? 'block' : 'none';
-      document.getElementById('profileLibPanel').style.display = isRamp ? 'block' : 'none';
     } else {
       if (wasRunActive) {
+        // FIX 3: run just ended — fire summary, then clear the flag immediately
+        // so the next poll() doesn't re-enter this branch.
         const wasRamp = wasSelectedMode === 2;
-        rsEl.textContent = wasRamp
-          ? '\u2705 Auto-Ramp run complete.'
-          : '\u25A0 Run stopped.';
+        wasRunActive    = false;   // ← clear BEFORE the async fetch so it can't re-trigger
+        wasSelectedMode = st.selectedMode;
+
+        rsEl.textContent = wasRamp ? '\u2705 Auto-Ramp run complete.' : '\u25A0 Run stopped.';
         rsEl.style.color = wasRamp ? '#0f9' : '#aaa';
 
         if (wasRamp) {
@@ -752,13 +796,19 @@ async function poll() {
             drawRunChart();
           }).catch(() => {});
         }
-      } else {
+      } else if (rsEl.textContent === 'No run active.' || rsEl.textContent === '') {
         rsEl.textContent = 'No run active.';
         rsEl.style.color = '#aaa';
       }
+      // If we previously showed a "run complete" or "run stopped" message, leave it
+      // visible — don't overwrite it with "No run active." on the next tick.
     }
-    wasRunActive = st.runActive;
-    wasSelectedMode = st.selectedMode;
+
+    // Track previous run state for next poll
+    if (st.runActive) {
+      wasRunActive    = true;
+      wasSelectedMode = st.selectedMode;
+    }
 
     if (!document.getElementById('cfgSp').value) {
       document.getElementById('cfgSp').value   = st.setpoint;
@@ -780,9 +830,8 @@ async function pollRamp() {
     }
     drawRunChart();
 
-    const stateName = (rs.rampState >= 0 && rs.rampState < RAMP_STATE_NAMES.length)
-      ? RAMP_STATE_NAMES[rs.rampState]
-      : String(rs.rampState);
+    const stateName  = (rs.rampState >= 0 && rs.rampState < RAMP_STATE_NAMES.length)
+      ? RAMP_STATE_NAMES[rs.rampState] : String(rs.rampState);
     const isOvershoot = rs.rampState === 4;
     const stateEl = document.getElementById('rsState');
     if (stateEl) { stateEl.textContent = stateName; stateEl.className = 'rs-val' + (isOvershoot ? ' alert' : ''); }
@@ -796,10 +845,10 @@ async function pollRamp() {
     const overEl = document.getElementById('rsOvershoot');
     if (rs.overshootAmt > 0) {
       overEl.textContent = '+' + rs.overshootAmt.toFixed(1) + '\u00B0C \u26A0';
-      overEl.className = 'rs-val alert';
+      overEl.className   = 'rs-val alert';
     } else {
       overEl.textContent = 'none';
-      overEl.className = 'rs-val good';
+      overEl.className   = 'rs-val good';
     }
 
     const coastCur = document.getElementById('rsCoastCur');
@@ -813,11 +862,13 @@ async function pollRamp() {
     const ageEl = document.getElementById('rsAge');
     if (ageEl) {
       const ageS = Math.floor(rs.stateAgeMs / 1000);
-      ageEl.textContent = Math.floor(ageS/60) + ':' + String(ageS%60).padStart(2,'0');
+      ageEl.textContent = Math.floor(ageS / 60) + ':' + String(ageS % 60).padStart(2, '0');
     }
 
     const soakEl = document.getElementById('rsSoakRemain');
-    if (soakEl) soakEl.textContent = rs.rampState === 5 ? Math.floor(rs.soakRemainS/60) + ':' + String(rs.soakRemainS%60).padStart(2,'0') + ' remaining' : '--';
+    if (soakEl) soakEl.textContent = rs.rampState === 5
+      ? Math.floor(rs.soakRemainS / 60) + ':' + String(rs.soakRemainS % 60).padStart(2, '0') + ' remaining'
+      : '--';
 
     const tbody = document.getElementById('learnedBody');
     if (tbody) {
@@ -828,14 +879,14 @@ async function pollRamp() {
           tr.innerHTML = `<td>${idx + 1}</td>`
             + `<td style="text-align:right">${s.fireStart.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.cutoff.toFixed(0)}\u00B0C</td>`
-            + `<td style="text-align:right;color:${(s.target !== undefined && s.peak > s.target+10) ? '#e74c3c':'#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
+            + `<td style="text-align:right;color:${(s.target !== undefined && s.peak > s.target + 10) ? '#e74c3c' : '#0f9'}">${s.peak.toFixed(0)}\u00B0C</td>`
             + `<td style="text-align:right">${s.coastRatio.toFixed(3)}</td>`;
           tbody.appendChild(tr);
         });
       }
       for (let i = rs.learnedCount; i < rs.stepCount - 1; i++) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td style="color:#555">${i+1}</td>` + `<td colspan="4" style="color:#555;text-align:right">--</td>`;
+        tr.innerHTML = `<td style="color:#555">${i + 1}</td>` + `<td colspan="4" style="color:#555;text-align:right">--</td>`;
         tbody.appendChild(tr);
       }
     }
@@ -889,9 +940,7 @@ async function toggleStop() {
     const action = resp.stopLatched ? 'release' : 'latch';
     await fetch('/stop', {method:'POST', body: new URLSearchParams({action})});
     poll();
-  } catch(e) {
-    console.warn('stop error', e);
-  }
+  } catch(e) { console.warn('stop error', e); }
 }
 
 function setManual(action) {
@@ -1024,7 +1073,7 @@ function setManual(action) {
       fMode.textContent = 'running: '  + (p.modeRunning ? 'YES' : 'NO');
       fMode.className   = 'badge '     + (p.modeRunning ? 'auto' : 'off');
 
-      fEs.textContent   = 'E-stop presses: ' + p.estopCount + '/3';
+      fEs.textContent      = 'E-stop presses: ' + p.estopCount + '/3';
       fEs.style.background = p.estopCount > 0 ? '#e67e22' : '#555';
 
     } catch(e) { /* device unreachable during reboot */ }
