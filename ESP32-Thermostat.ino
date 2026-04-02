@@ -24,12 +24,15 @@
 #endif
 
 // ─── Pin assignments ──────────────────────────────────────────────────────────
-const uint8_t PIN_MOSFET  =  3;
-const uint8_t PIN_SDA     =  8;
-const uint8_t PIN_SCL     =  9;
-const uint8_t PIN_BTN_UP  =  6;
-const uint8_t PIN_BTN_DN  =  4;
-const uint8_t PIN_BTN_CTR =  5;
+const uint8_t PIN_MOSFET  =  0;
+const uint8_t PIN_SDA     =  10;
+const uint8_t PIN_SCL     =  8;
+const uint8_t PIN_BTN_UP  =  5;
+const uint8_t PIN_BTN_DN  =  7;
+const uint8_t PIN_BTN_CTR =  6;
+const uint8_t MAX_SCK =  4;
+const uint8_t MAX_CS =  3;
+const uint8_t MAX_SO =  2;
 
 // outputOn=true  -> PIN_MOSFET LOW  (active-low load)
 // outputOn=false -> PIN_MOSFET HIGH
