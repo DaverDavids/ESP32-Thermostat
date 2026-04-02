@@ -33,7 +33,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <div>CJC (board): <span id="cjcC">--</span> &deg;C</div>
     <div>Shunt mV (raw): <span id="shuntMV">--</span> mV</div>
     <div>Total mV (with CJC): <span id="totalMV">--</span> mV</div>
-    <div>Ramp phase: <span id="rampPhase">--</span> &nbsp; Last overshoot: <span id="overshoot">--</span> &deg;C</div>
   </div>
   <div style="margin-top:.8rem;display:flex;gap:.5rem;">
     <button onclick="setOutput('on')">Manual ON</button>
@@ -106,8 +105,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
 </div>
 
 <script>
-const RAMP_PHASE_NAMES = ['Idle', 'Heating', 'Coasting', 'Wait stable'];
-
+// ── Minimal canvas line chart (no external libs) ─────────────────────────────
 function drawChart(data, setpoint) {
   const c = document.getElementById('chart');
   const w = c.width = c.offsetWidth;
@@ -120,9 +118,11 @@ function drawChart(data, setpoint) {
   const sx = w / (data.length - 1 || 1);
   const sy = h / (max - min);
   const py = v => h - (v - min) * sy;
+  // Setpoint line
   ctx.strokeStyle = '#e94560'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
   ctx.beginPath(); ctx.moveTo(0, py(setpoint)); ctx.lineTo(w, py(setpoint)); ctx.stroke();
   ctx.setLineDash([]);
+  // Temp line
   ctx.strokeStyle = '#0f9'; ctx.lineWidth = 2;
   ctx.beginPath();
   data.forEach((v, i) => i ? ctx.lineTo(i*sx, py(v)) : ctx.moveTo(0, py(v)));
@@ -130,19 +130,13 @@ function drawChart(data, setpoint) {
 }
 
 let currentSetpoint = 500;
-let pollActive = false;   // guard: only one fetch chain in-flight at a time
-let pollDelay  = 500;     // ms; backs off on error, resets on success
 
 async function poll() {
-  if (pollActive) return;
-  pollActive = true;
   try {
     const [st, hist] = await Promise.all([
-      fetch('/status').then(r => { if (!r.ok) throw new Error('status ' + r.status); return r.json(); }),
-      fetch('/history').then(r => { if (!r.ok) throw new Error('history ' + r.status); return r.json(); })
+      fetch('/status').then(r=>r.json()),
+      fetch('/history').then(r=>r.json())
     ]);
-    pollDelay = 500;   // reset back-off on success
-
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
     document.getElementById('uvpc').textContent = st.uvPerC.toFixed(4);
@@ -155,24 +149,21 @@ async function poll() {
       outEl.className = 'badge auto';
     }
     currentSetpoint = st.setpoint;
-    if (st.cjcC    !== undefined) document.getElementById('cjcC').textContent    = st.cjcC.toFixed(1);
-    if (st.shuntMV !== undefined) document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
-    if (st.totalMV !== undefined) document.getElementById('totalMV').textContent = st.totalMV.toFixed(4);
-
-    // Ramp phase & overshoot
-    if (st.rampPhase !== undefined) {
-      document.getElementById('rampPhase').textContent = RAMP_PHASE_NAMES[st.rampPhase] || st.rampPhase;
+    // Live fields for CJC and total voltage
+    if (st.cjcC !== undefined) {
+      document.getElementById('cjcC').textContent = st.cjcC.toFixed(1);
     }
-    if (st.overshoot !== null && st.overshoot !== undefined) {
-      document.getElementById('overshoot').textContent = (typeof st.overshoot === 'number') ? st.overshoot.toFixed(1) : '--';
-    } else {
-      document.getElementById('overshoot').textContent = '--';
+    if (st.shuntMV !== undefined) {
+      document.getElementById('shuntMV').textContent = st.shuntMV.toFixed(4);
     }
-
+    if (st.totalMV !== undefined) {
+      document.getElementById('totalMV').textContent = st.totalMV.toFixed(4);
+    }
+    // Pre-fill config form if empty
     if (!document.getElementById('cfgSp').value) {
-      document.getElementById('cfgSp').value   = st.setpoint;
-      document.getElementById('cfgHyst').value = st.hysteresis;
-      document.getElementById('cfgOff').value  = st.offset;
+      document.getElementById('cfgSp').value    = st.setpoint;
+      document.getElementById('cfgHyst').value  = st.hysteresis;
+      document.getElementById('cfgOff').value   = st.offset;
       var pEl = document.getElementById('cfgPtype');
       if (pEl) {
         var pVal = (st.customUvPerC > 0) ? 2 : st.probeType;
@@ -180,37 +171,36 @@ async function poll() {
         updateCalMode(pVal);
       }
     }
+
     if (!document.getElementById('cfgCjco').value && document.getElementById('cfgCjco').value !== '0') {
-      document.getElementById('cfgCjco').value = st.cjcOffset;
+    document.getElementById('cfgCjco').value = st.cjcOffset;
     }
+
+    // Always show current calibration result
     const calResultEl = document.getElementById('calResult');
     if (st.customUvPerC > 0) {
       calResultEl.textContent = 'Calibrated uV/°C = ' + st.customUvPerC.toFixed(4) + ', Offset = ' + st.offset.toFixed(4);
     } else {
       calResultEl.textContent = '';
     }
-    if (document.getElementById('calMv1').value === '') {
+    // Pre-fill calibration form with saved points on first load; also include CJCs
+    if (document.getElementById('calMv1').value === "") {
       document.getElementById('calMv1').value   = st.calMv1;
       document.getElementById('calCjc1').value  = st.calCjc1;
       document.getElementById('calTemp1').value = st.calTemp1;
       document.getElementById('calMv2').value   = st.calMv2;
       document.getElementById('calCjc2').value  = st.calCjc2;
       document.getElementById('calTemp2').value = st.calTemp2;
+    // Prefill calibration probe type if available
     }
     drawChart(hist, currentSetpoint);
-  } catch(e) {
-    console.warn('poll error', e);
-    // Exponential back-off up to 5 s so a stalled ESP32 isn't hammered
-    pollDelay = Math.min(pollDelay * 2, 5000);
-  } finally {
-    pollActive = false;
-    setTimeout(poll, pollDelay);  // self-schedule; never overlaps
-  }
+  } catch(e) { console.warn('poll error', e); }
 }
 
-// Kick off the first poll immediately; all subsequent polls are self-scheduled
+setInterval(poll, 500);
 poll();
 
+// ── Config form ──────────────────────────────────────────────────────────────
 document.getElementById('cfgForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -220,6 +210,7 @@ document.getElementById('cfgForm').addEventListener('submit', async e => {
   poll();
 });
 
+// ── Calibration form ──────────────────────────────────────────────────────────
 document.getElementById('calForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -235,6 +226,7 @@ document.getElementById('calForm').addEventListener('submit', async e => {
   }
 });
 
+// ── WiFi form ─────────────────────────────────────────────────────────────────
 document.getElementById('wifiForm').addEventListener('submit', async e => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -243,6 +235,7 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
   alert('WiFi saved. Device will reboot.');
 });
 
+// ── Clear calibration ─────────────────────────────────────────────────────────
 async function clearCalibration() {
   try {
     const r = await fetch('/calibrate/clear', {method:'POST'});
@@ -254,18 +247,16 @@ async function clearCalibration() {
     document.getElementById('calResult').textContent = 'Clear failed: ' + err;
   }
 }
-
+// (Removed duplicate postOutput helper; use setOutput(mode) instead.)
 function setOutput(mode){
-  fetch('/output', {method:'POST', body:new URLSearchParams({mode})})
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-    .then(() => poll())
-    .catch(e => console.warn('output error', e));
+  // New explicit API wrapper for output control
+  fetch('/output', {method:'POST', body:new URLSearchParams({mode})}).then(r=>{ if(!r.ok) throw new Error('HTTP ' + r.status); return r.text();}).then(()=>poll()).catch(e=>console.warn('output error', e));
 }
-
 function updateCalMode(val){
   var el = document.getElementById('calInputs');
   if (el) el.style.display = (val == '2') ? 'block' : 'none';
 }
+// Probe type changes are submitted via the config form (no extra listener)
 </script>
 </body>
 </html>

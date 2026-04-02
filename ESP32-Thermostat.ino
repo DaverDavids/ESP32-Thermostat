@@ -10,7 +10,6 @@
 #include <Adafruit_SSD1306.h>
 #include "html.h"
 #include <Secrets.h>
-#include <esp_task_wdt.h>
 
 // ─── Debug ────────────────────────────────────────────────────────────────────
 #define DEBUG 1
@@ -47,22 +46,22 @@ const uint32_t WIFI_RETRY_MS   = 300000;
 #define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
-const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (~37Hz)
+const uint32_t FAST_SAMPLE_MS = 27;   // INA219 poll rate (50Hz)
 const uint32_t REPORT_MS      = 500;  // log/control/history rate (2Hz)
 const uint32_t DISPLAY_MS     = 100;  // OLED update rate (10Hz)
 // Outlier rejection and dropout thresholds
-const float OUTLIER_MAX_JUMP = 150.0f;
-const float SHUNT_MIN_MV      = -5.0f;
+const float OUTLIER_MAX_JUMP = 150.0f; // °C max change between samples
+const float SHUNT_MIN_MV      = -5.0f;  // below this = dropout
 
 // ─── Fast sampling / median filter ───────────────────────────────────────────
-#define MEDIAN_N 9
+#define MEDIAN_N 9          // must be odd; 9 × 20ms = 180ms window
 float   medBuf[MEDIAN_N];
 uint8_t medCount = 0;
 unsigned long lastFastSample = 0;
 
 // ─── Button debounce / long-press ──────────────────────────────────────────────
 const uint32_t DEBOUNCE_MS      =   30;
-const uint32_t CTR_LONGPRESS_MS = 2000;
+const uint32_t CTR_LONGPRESS_MS = 2000;  // hold time to change state
 
 // ─── Setpoint ramp (hold-to-accelerate) ──────────────────────────────────────
 const uint32_t RAMP_DELAY_MS        =  200;
@@ -72,31 +71,6 @@ const float    RAMP_ACCEL           = 0.75f;
 const float    SP_STEP_INITIAL      =  1.0f;
 const float    SP_STEP_MAX          =  1.0f;
 const float    SP_STEP_ACCEL        = 1.15f;
-// Only save setpoint to NVS this often during rapid button ramp (ms)
-const uint32_t PREFS_SAVE_DEBOUNCE_MS = 2000;
-
-// ─── Auto-ramp: stability / overshoot tracking ───────────────────────────────
-// Stability is declared when the temperature has not changed by more than
-// STABLE_BAND over STABLE_WINDOW_REPORTS consecutive 500ms reports.
-// The baseline for comparison is reset every STABLE_WINDOW_REPORTS samples
-// so a slow continuing rise doesn't sneak past the check.
-const uint8_t STABLE_WINDOW_REPORTS = 10;  // 5 seconds of reports
-const float   STABLE_BAND           =  2.0f; // °C change allowed across window
-
-// Peak tracking: after heater turns off we keep watching until temp starts
-// falling, then record the true peak for overshoot calculation.
-enum RampPhase {
-  RAMP_IDLE,          // not in auto or not waiting
-  RAMP_HEATING,       // heater on, climbing toward setpoint
-  RAMP_COASTING,      // heater just turned off, watching for peak
-  RAMP_WAIT_STABLE,   // past peak, waiting for temp to stabilise
-};
-
-RampPhase rampPhase       = RAMP_IDLE;
-float     rampPeakTemp    = NAN;    // true peak seen after heater off
-float     rampStableBase  = NAN;    // baseline temp at start of stability window
-uint8_t   rampStableCount = 0;      // reports since last baseline reset
-float     lastOvershoot   = NAN;    // most recent overshoot (°C above setpoint)
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 Preferences      prefs;
@@ -108,20 +82,20 @@ Adafruit_SSD1306 display(OLED_W, OLED_H, &Wire, -1);
 float    setpoint    = 500.0f;
 float    currentTemp =   0.0f;
 float    lastShuntMV =   0.0f;
-float    lastGoodTemp   = NAN;
-bool     outputOn       = false;
+float    lastGoodTemp   = NAN;   // for outlier rejection
+bool     outputOn       = false;  // relay off at boot
 bool     apMode         = false;
-bool     manualOverride = true;
+bool     manualOverride = true;   // boot into manual OFF
 
 float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
 int      probeType       =  0;
-float    customUvPerC    =  0.0f;
-float    cjcOffset       = -12.0f;
-float    calMv1          =  0.0f;
-float    calTemp1        =  0.0f;
-float    calMv2          =  0.0f;
-float    calTemp2        =  0.0f;
+float    customUvPerC    =  0.0f; // overrides probe type calibration when >0
+float    cjcOffset       = -12.0f; // die temp offset; default -12C
+float    calMv1          =  0.0f;   // raw mV point 1 for calibration
+float    calTemp1        =  0.0f;   // raw temp point 1 for calibration
+float    calMv2          =  0.0f;   // raw mV point 2 for calibration
+float    calTemp2        =  0.0f;   // raw temp point 2 for calibration
 float    calCjc1         =  0.0f;
 float    calCjc2         =  0.0f;
 String   savedSSID       = MYSSID;
@@ -134,6 +108,7 @@ float    tempHistory[HIST_SIZE];
 uint16_t histHead  = 0;
 uint16_t histCount = 0;
 
+// NEW: log buffer for samples
 struct SampleLog { float tC; float shuntmV; };
 #define LOG_SIZE 256
 SampleLog sampleLog[LOG_SIZE];
@@ -141,11 +116,12 @@ uint16_t logHead  = 0;
 uint16_t logCount = 0;
 
 unsigned long lastReport        = 0;
+// removed duplicate global lastFastSample; keep the one in the fast-sampling block
 unsigned long lastWifiRetry     = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long bootTime          = 0;
-unsigned long lastPrefsSave     = 0;   // debounce NVS writes from button ramp
-bool otaStarted    = false;
+// Track whether OTA/server have been started to avoid early binds
+bool otaStarted   = false;
 bool serverStarted = false;
 
 // ─── Button state ─────────────────────────────────────────────────────────────
@@ -158,15 +134,13 @@ struct BtnState {
   unsigned long nextFire;
   float     currentInterval;
   float     currentStep;
-  bool      dirty;   // setpoint changed since last NVS save
 } btns[3];
 
 // ─── Forward declarations ─────────────────────────────────────────────────────
 void loadPrefs(); void savePrefs();
 void startSTA();  void startAP(); void onWifiConnect();
 void setupOTA();  void setupRoutes();
-float rawTempC(); float medianOf(float* arr, uint8_t n);
-void controlLoop(); void updateRampPhase();
+float rawTempC(); float medianOf(float* arr, uint8_t n); void controlLoop();
 void updateButtons(); void updateDisplay();
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
@@ -179,8 +153,7 @@ void setup() {
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
-    btns[i] = { btnPins[i], BTN_IDLE, 0, 0,
-                (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL, false };
+    btns[i] = { btnPins[i], BTN_IDLE, 0, 0, (float)RAMP_RATE_INITIAL_MS, SP_STEP_INITIAL };
     pinMode(btnPins[i], INPUT_PULLUP);
   }
 
@@ -201,6 +174,7 @@ void setup() {
     DBGLN("OLED ready");
   }
 
+  // Blocking WiFi connect (restore original behavior)
   loadPrefs();
   WiFi.persistent(false);
   WiFi.disconnect(true, true);
@@ -228,23 +202,17 @@ void setup() {
   }
   display.display();
   bootTime = millis();
+  // OTA and Web server startup will be done after WiFi connects in onWifiConnect()
   DBGLN("Ready");
 }
 
 // ─── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
-  // Feed the watchdog so long control-loop waits don't trigger a reset
-  esp_task_wdt_reset();
-
   if (apMode) dns.processNextRequest();
   updateButtons();
-
-  // Yield to lwIP / BT stack before heavy handlers to keep TCP alive
-  yield();
-  if (otaStarted)    ArduinoOTA.handle();
-  yield();
+  // OTA/Server loop handling (start-up guarded elsewhere)
+  if (otaStarted) ArduinoOTA.handle();
   if (serverStarted) server.handleClient();
-  yield();
 
   unsigned long now = millis();
 
@@ -255,7 +223,7 @@ void loop() {
     if (medCount < MEDIAN_N) medCount++;
   }
 
-  // Periodic report
+  // Periodic report with median filter
   if (now - lastReport >= REPORT_MS) {
     lastReport = now;
     if (medCount > 0) {
@@ -270,34 +238,23 @@ void loop() {
     logHead  = (logHead + 1) % LOG_SIZE;
     if (logCount < LOG_SIZE) logCount++;
     medCount = 0;
-    if (!manualOverride) {
-      controlLoop();
-      updateRampPhase();
-    }
+    if (!manualOverride) controlLoop();
   }
 
-  // Button ramp: fire setpoint increments, defer NVS save
   if (btns[0].phase == BTN_HELD && now >= btns[0].nextFire) {
     setpoint = min(setpoint + btns[0].currentStep, 1200.0f);
     btns[0].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[0].currentInterval * RAMP_ACCEL);
     btns[0].currentStep     = min(SP_STEP_MAX, btns[0].currentStep * SP_STEP_ACCEL);
     btns[0].nextFire        = now + (unsigned long)btns[0].currentInterval;
-    btns[0].dirty           = true;
+    savePrefs();
   }
+
   if (btns[1].phase == BTN_HELD && now >= btns[1].nextFire) {
     setpoint = max(setpoint - btns[1].currentStep, 0.0f);
     btns[1].currentInterval = max((float)RAMP_RATE_MIN_MS, btns[1].currentInterval * RAMP_ACCEL);
     btns[1].currentStep     = min(SP_STEP_MAX, btns[1].currentStep * SP_STEP_ACCEL);
     btns[1].nextFire        = now + (unsigned long)btns[1].currentInterval;
-    btns[1].dirty           = true;
-  }
-  // Flush NVS write at most once per PREFS_SAVE_DEBOUNCE_MS
-  bool anyDirty = btns[0].dirty || btns[1].dirty;
-  if (anyDirty && now - lastPrefsSave >= PREFS_SAVE_DEBOUNCE_MS) {
     savePrefs();
-    lastPrefsSave    = now;
-    btns[0].dirty    = false;
-    btns[1].dirty    = false;
   }
 
   if (apMode && now - lastWifiRetry > WIFI_RETRY_MS) {
@@ -305,9 +262,7 @@ void loop() {
     WiFi.disconnect(true); delay(100);
     startSTA();
     unsigned long t = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) {
-      delay(250); yield();
-    }
+    while (WiFi.status() != WL_CONNECTED && millis() - t < WIFI_TIMEOUT_MS) delay(250);
     if (WiFi.status() == WL_CONNECTED) {
       dns.stop(); apMode = false; onWifiConnect();
     } else {
@@ -319,6 +274,8 @@ void loop() {
     }
   }
 
+  // Stale: removed old single-sample path (readTempC) and related scheduling
+
   if (now - lastDisplayUpdate >= DISPLAY_MS) {
     lastDisplayUpdate = now;
     if (now - bootTime >= IP_SPLASH_MS) {
@@ -328,17 +285,35 @@ void loop() {
 }
 
 // ─── Display ──────────────────────────────────────────────────────────────────
+//
+// Numbers: setTextSize(3) = 18px wide x 24px tall, y=4  (fills 28/32px)
+// Label:   setTextSize(1) = 6px wide  x 8px  tall, y=12 (vertically centered)
+//
+// Pixel budget (128px wide):// Direct solve — no uvEst needed
+// At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
+//           = mv1*1000/uvPerC + cjc1 + offset
+// At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
+// Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
+// Solve for uvPerC:
+
+
+//   Temp  right-edge  x=54  (3 digits x 18 = 54px, starts x=0)
+//   Gap                     20px  (x=54..74)
+//   Label left-edge   x=55  ON=12px, OFF=18px  ✓
+//   Setpoint left     x=74  (3 digits x 18 = 54px, ends x=128)  ✓
+//
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
-  const int NUM_Y   =  4;
-  const int LBL_Y   = 12;
-  const int NUM_CW  = 18;
-  const int T_REDGE = 54;
-  const int LBL_X   = 55;
-  const int SP_X    = 74;
+  const int NUM_Y   =  4;   // size-3 numbers top
+  const int LBL_Y   = 12;   // size-1 label top (vertically centered in 32px)
+  const int NUM_CW  = 18;   // size-3 char width
+  const int T_REDGE = 54;   // right edge of temp field
+  const int LBL_X   = 55;   // left edge of label
+  const int SP_X    = 74;   // left edge of setpoint
 
+  // ─ Temp: size 3, right-aligned
   display.setTextSize(3);
   String tempStr = String((int)round(currentTemp));
   int tempX = T_REDGE - (int)tempStr.length() * NUM_CW;
@@ -346,12 +321,14 @@ void updateDisplay() {
   display.setCursor(tempX, NUM_Y);
   display.print(tempStr);
 
+  // ─ Center label: size 1, only in manual override
   if (manualOverride) {
     display.setTextSize(1);
     display.setCursor(LBL_X, LBL_Y);
     display.print(outputOn ? "ON" : "OFF");
   }
 
+  // ─ Setpoint: size 3, left-aligned
   display.setTextSize(3);
   display.setCursor(SP_X, NUM_Y);
   display.print((int)round(setpoint));
@@ -360,6 +337,13 @@ void updateDisplay() {
 }
 
 // ─── Button handling ──────────────────────────────────────────────────────────
+//
+// UP / DN: short press + hold ramps setpoint (unchanged)
+// CENTER:  must hold CTR_LONGPRESS_MS (2s) to change state
+//   manual OFF -> manual ON
+//   manual ON  -> manual OFF
+//   manual OFF -> auto
+//
 void updateButtons() {
   unsigned long now = millis();
   for (int i = 0; i < 3; i++) {
@@ -381,25 +365,25 @@ void updateButtons() {
           btns[i].phase           = BTN_HELD;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
+          // UP/DN fire immediately after ramp delay; CENTER waits for long press
           btns[i].nextFire = now + (i == 2 ? CTR_LONGPRESS_MS : RAMP_DELAY_MS);
-          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); btns[0].dirty = true; }
-          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); btns[1].dirty = true; }
+
+          // UP / DN: first step on confirm
+          if (i == 0) { setpoint = min(setpoint + SP_STEP_INITIAL, 1200.0f); savePrefs(); }
+          if (i == 1) { setpoint = max(setpoint - SP_STEP_INITIAL,    0.0f); savePrefs(); }
+          // CENTER: action deferred until nextFire (long press)
         }
         break;
 
       case BTN_HELD:
         if (!low) {
+          // released before long press fired for center
           btns[i].phase           = BTN_IDLE;
           btns[i].currentInterval = RAMP_RATE_INITIAL_MS;
           btns[i].currentStep     = SP_STEP_INITIAL;
-          // Flush any pending NVS write on button release
-          if (btns[i].dirty) {
-            savePrefs();
-            btns[i].dirty = false;
-            lastPrefsSave = now;
-          }
         } else if (i == 2 && now >= btns[i].nextFire) {
-          btns[i].nextFire = ULONG_MAX;
+          // CENTER long press fired
+          btns[i].nextFire = ULONG_MAX;  // prevent re-fire while still held
           if (!manualOverride) {
             manualOverride = true;
             outputOn       = true;
@@ -411,12 +395,6 @@ void updateButtons() {
             DBGLN("Manual OFF");
           } else {
             manualOverride = false;
-            // Reset ramp tracking when entering auto
-            rampPhase       = RAMP_HEATING;
-            rampPeakTemp    = NAN;
-            rampStableBase  = NAN;
-            rampStableCount = 0;
-            lastOvershoot   = NAN;
             DBGLN("Auto mode");
           }
         }
@@ -436,10 +414,12 @@ float rawTempC() {
   float total_mV = smV + cjc_mV;
   float candidate = (total_mV * 1000.0f / uv_per_c) + probeOffset;
 
+  // Reject if shunt is below noise floor (probe dropout)
   if (smV < SHUNT_MIN_MV) {
     DBG("Dropout smV="); DBGLN(smV);
     return isnan(lastGoodTemp) ? cjc_C : lastGoodTemp;
   }
+  // Reject if jump is implausibly large (but allow on first reading)
   if (!isnan(lastGoodTemp) && fabsf(candidate - lastGoodTemp) > OUTLIER_MAX_JUMP) {
     DBG("Jump reject: "); DBGLN(candidate);
     return lastGoodTemp;
@@ -468,75 +448,6 @@ void controlLoop() {
   MOSFET_WRITE(outputOn);
 }
 
-// ─── Auto-ramp phase tracker ──────────────────────────────────────────────────
-// Called once per REPORT_MS tick, only when !manualOverride.
-//
-// RAMP_HEATING   -> heater on, climbing. Transitions to RAMP_COASTING the
-//                   first time controlLoop() turns the heater off.
-// RAMP_COASTING  -> heater off, temp still rising (thermal inertia).
-//                   Track the true peak. Transition to RAMP_WAIT_STABLE once
-//                   temp starts falling (current < peak - 0.5).
-// RAMP_WAIT_STABLE -> temp falling back. Wait for it to genuinely stabilise.
-//                   Stability = the temperature change over the last
-//                   STABLE_WINDOW_REPORTS reports is less than STABLE_BAND.
-//                   The reference baseline is reset each window so a
-//                   slow-but-continuing drift doesn't hide the instability.
-void updateRampPhase() {
-  switch (rampPhase) {
-
-    case RAMP_IDLE:
-      // Nothing to track; entered auto via button handler
-      break;
-
-    case RAMP_HEATING:
-      // Watch for the bang-bang controller turning the heater off
-      if (!outputOn) {
-        rampPhase    = RAMP_COASTING;
-        rampPeakTemp = currentTemp;   // provisional peak, will be updated
-        DBG("Ramp: heater off at "); DBGLN(currentTemp);
-      }
-      break;
-
-    case RAMP_COASTING: {
-      // Update the true peak as long as temperature keeps rising
-      if (currentTemp > rampPeakTemp) {
-        rampPeakTemp = currentTemp;
-      }
-      // Transition to wait-for-stable once temp has clearly turned around
-      // (dropped at least 0.5 C below the peak we've seen)
-      if (rampPeakTemp - currentTemp >= 0.5f) {
-        lastOvershoot   = rampPeakTemp - setpoint;
-        rampPhase       = RAMP_WAIT_STABLE;
-        rampStableBase  = currentTemp;   // baseline for first stability window
-        rampStableCount = 0;
-        DBG("Ramp: peak "); DBG(rampPeakTemp);
-        DBG(" overshoot "); DBGLN(lastOvershoot);
-      }
-      break;
-    }
-
-    case RAMP_WAIT_STABLE: {
-      rampStableCount++;
-      // Reset the reference baseline every STABLE_WINDOW_REPORTS ticks.
-      // This means we only declare stable if the LAST window was calm,
-      // not if the temperature happened to be similar at two distant points.
-      if (rampStableCount >= STABLE_WINDOW_REPORTS) {
-        float delta = fabsf(currentTemp - rampStableBase);
-        DBG("Stability check delta="); DBGLN(delta);
-        if (delta <= STABLE_BAND) {
-          DBGLN("Ramp: stable — ready for next step");
-          rampPhase = RAMP_IDLE;
-        } else {
-          // Still moving; slide the window forward
-          rampStableBase  = currentTemp;
-          rampStableCount = 0;
-        }
-      }
-      break;
-    }
-  }
-}
-
 // ─── WiFi helpers ─────────────────────────────────────────────────────────────
 void startSTA() {
   WiFi.mode(WIFI_STA);
@@ -562,10 +473,11 @@ void onWifiConnect() {
   if (MDNS.begin(HOSTNAME)) {
     DBGLN(String("mDNS: ") + HOSTNAME + ".local");
   }
+  // Start OTA and WebServer after WiFi is up
   setupOTA();
   setupRoutes();
   server.begin();
-  otaStarted    = true;
+  otaStarted = true;
   serverStarted = true;
 }
 
@@ -593,7 +505,7 @@ void loadPrefs() {
   calCjc2       = prefs.getFloat ("cjc2",    0.0);
   savedSSID     = prefs.getString("ssid", MYSSID);
   savedPSK      = prefs.getString("psk",   MYPSK);
-  cjcOffset     = prefs.getFloat ("cjco",  -12.0);
+  cjcOffset     = prefs.getFloat("cjco", -12.0);
   prefs.end();
 }
 
@@ -612,7 +524,7 @@ void savePrefs() {
   prefs.putFloat ("t2",    calTemp2);
   prefs.putString("ssid",  savedSSID);
   prefs.putString("psk",   savedPSK);
-  prefs.putFloat ("cjco",  cjcOffset);
+  prefs.putFloat("cjco", cjcOffset);
   prefs.end();
 }
 
@@ -635,33 +547,31 @@ void setupRoutes() {
     float cjc_mV  = (cjc_C * uvPerC) / 1000.0f;
     float totalMV = lastShuntMV + cjc_mV;
 
-    String j = "{\"temp\":"         + String(currentTemp,    1)
-            + ",\"setpoint\":"     + String(setpoint,        1)
-            + ",\"output\":"       + String(outputOn ? 1 : 0)
-            + ",\"manual\":"       + String(manualOverride ? 1 : 0)
-            + ",\"hysteresis\":"   + String(hysteresis,      1)
-            + ",\"offset\":"       + String(probeOffset,     1)
-            + ",\"probeType\":"    + String(probeType)
-            + ",\"customUvPerC\":" + String(customUvPerC,    4)
-            + ",\"shuntMV\":"      + String(lastShuntMV,     4)
-            + ",\"totalMV\":"      + String(totalMV,         4)
-            + ",\"cjcC\":"         + String(cjc_C,           2)
-            + ",\"uvPerC\":"       + String(uvPerC,          4)
+    String j = "{\"temp\":"        + String(currentTemp,    1)
+            + ",\"setpoint\":"    + String(setpoint,        1)
+            + ",\"output\":"      + String(outputOn ? 1 : 0)
+            + ",\"manual\":"      + String(manualOverride ? 1 : 0)
+            + ",\"hysteresis\":"  + String(hysteresis,      1)
+            + ",\"offset\":"      + String(probeOffset,     1)
+            + ",\"probeType\":"   + String(probeType)
+            + ",\"customUvPerC\":" + String(customUvPerC, 4)
+            + ",\"shuntMV\":"     + String(lastShuntMV,     4)
+            + ",\"totalMV\":"     + String(totalMV,         4)
+            + ",\"cjcC\":"        + String(cjc_C,           2)
+            + ",\"uvPerC\":"      + String(uvPerC,          4)
             + ",\"cjcOffset\":"    + String(cjcOffset,        1)
-            + ",\"calMv1\":"       + String(calMv1,          4)
-            + ",\"calTemp1\":"     + String(calTemp1,        1)
-            + ",\"calCjc1\":"      + String(calCjc1,         2)
-            + ",\"calMv2\":"       + String(calMv2,          4)
-            + ",\"calTemp2\":"     + String(calTemp2,        1)
-            + ",\"calCjc2\":"      + String(calCjc2,         2)
-            + ",\"rampPhase\":"    + String((int)rampPhase)
-            + ",\"overshoot\":"    + (isnan(lastOvershoot) ? String("null") : String(lastOvershoot, 1))
+            + ",\"calMv1\":"      + String(calMv1,          4)
+            + ",\"calTemp1\":"    + String(calTemp1,        1)
+            + ",\"calCjc1\":"     + String(calCjc1,         2)
+            + ",\"calMv2\":"      + String(calMv2,          4)
+            + ",\"calTemp2\":"    + String(calTemp2,        1)
+            + ",\"calCjc2\":"     + String(calCjc2,         2)
             + "}";
     server.send(200, "application/json", j);
   });
 
   server.on("/calibrate", HTTP_POST, []() {
-    if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
+  if (!server.hasArg("mv1") || !server.hasArg("cjc1") || !server.hasArg("temp1") ||
         !server.hasArg("mv2") || !server.hasArg("cjc2") || !server.hasArg("temp2")) {
       server.send(400, "text/plain", "Missing mv1, cjc1, temp1, mv2, cjc2, or temp2");
       return;
@@ -672,17 +582,29 @@ void setupRoutes() {
     float mv2   = server.arg("mv2").toFloat();
     float cjc2  = server.arg("cjc2").toFloat();
     float temp2 = server.arg("temp2").toFloat();
+    
     if (temp2 <= temp1) {
       server.send(400, "text/plain", "temp2 must be greater than temp1");
       return;
     }
+    
+    // Store raw calibration points
     calMv1 = mv1; calTemp1 = temp1; calCjc1 = cjc1;
     calMv2 = mv2; calTemp2 = temp2; calCjc2 = cjc2;
-    float dMv   = mv2 - mv1;
-    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);
+    
+    // Direct solve — no uvEst needed
+    // At point 1: temp1 = ((mv1 + cjc1*uvPerC/1000) * 1000/uvPerC) + offset
+    //           = mv1*1000/uvPerC + cjc1 + offset
+    // At point 2: temp2 = mv2*1000/uvPerC + cjc2 + offset
+    // Subtract:   temp2-temp1 = (mv2-mv1)*1000/uvPerC + (cjc2-cjc1)
+    // Solve for uvPerC:
+    float dMv   = mv2 - mv1;           // 3.885
+    float dTemp = (temp2 - temp1) - (cjc2 - cjc1);  // (176-21.5) - (25-25) = 154.5
     customUvPerC = (dMv * 1000.0f) / dTemp;
     probeOffset  = temp1 - (mv1 * 1000.0f / customUvPerC) - cjc1;
+
     savePrefs();
+    
     String response = String("{\"uvPerC\":") + String(customUvPerC, 4)
                     + ",\"offset\":" + String(probeOffset, 4) + "}";
     server.send(200, "application/json", response);
@@ -690,7 +612,7 @@ void setupRoutes() {
 
   server.on("/calibrate/clear", HTTP_POST, []() {
     customUvPerC = 0.0f;
-    probeOffset  = 0.0f;
+    probeOffset = 0.0f;
     savePrefs();
     server.send(200, "application/json", "{\"status\":\"cleared\"}");
   });
@@ -706,6 +628,7 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
+  // New: CSV log endpoint
   server.on("/log", HTTP_GET, []() {
     uint16_t count = (logCount < LOG_SIZE) ? logCount : LOG_SIZE;
     uint16_t start = (logCount < LOG_SIZE) ? 0 : logHead;
@@ -722,7 +645,8 @@ void setupRoutes() {
     if (server.hasArg("hyst"))  hysteresis  = server.arg("hyst").toFloat();
     if (server.hasArg("off"))   probeOffset = server.arg("off").toFloat();
     if (server.hasArg("ptype")) probeType   = server.arg("ptype").toInt();
-    if (server.hasArg("cjco"))  cjcOffset   = server.arg("cjco").toFloat();
+    // Optional: CJC offset
+    if (server.hasArg("cjco")) cjcOffset = server.arg("cjco").toFloat();
     savePrefs();
     server.send(200, "text/plain", "OK");
   });
@@ -740,6 +664,7 @@ void setupRoutes() {
     }
   });
 
+  // Web UI: output control route
   server.on("/output", HTTP_POST, []() {
     String mode = server.arg("mode");
     if (mode == "on") {
@@ -747,12 +672,7 @@ void setupRoutes() {
     } else if (mode == "off") {
       manualOverride = true; outputOn = false; MOSFET_WRITE(false);
     } else if (mode == "auto") {
-      manualOverride  = false;
-      rampPhase       = RAMP_HEATING;
-      rampPeakTemp    = NAN;
-      rampStableBase  = NAN;
-      rampStableCount = 0;
-      lastOvershoot   = NAN;
+      manualOverride = false;
     } else {
       server.send(400, "text/plain", "mode must be on, off, or auto"); return;
     }
