@@ -25,7 +25,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   /* ── Layout grid ── */
   .row{display:grid;gap:.75rem;margin-bottom:.75rem}
   .row-2{grid-template-columns:1fr 1fr}
-  .row-3{grid-template-columns:1fr 1fr 1fr}
+  .row-3{grid-template-columns:repeat(auto-fill, minmax(220px, 1fr))}
   .row-1{grid-template-columns:1fr}
 
   @media(max-width:600px){
@@ -274,6 +274,19 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       </form>
     </div>
   </div>
+
+  <div class="card">
+    <h2>&#x23F1; Duty Cycle</h2>
+    <label>Max ON % per period
+      <input type="number" step="1" min="1" max="100" id="dcPct" value="100">
+    </label>
+    <label>Period (ms)
+      <input type="number" step="1000" min="1000" max="3600000" id="dcPeriodMs" value="60000">
+    </label>
+    <button onclick="saveDutyCycle()">Save Duty Cycle</button>
+    <div id="dcStatus" style="margin-top:.4rem;font-size:.85rem;color:#aaa;"></div>
+    <div id="dcMsg" style="font-size:.85rem;color:#0f9;margin-top:.2rem;"></div>
+  </div>
 </div>
 
 <div style="height:.75rem"></div>
@@ -361,10 +374,13 @@ function parseLogCSV(text) {
 let lastSyncTs = 0;
 async function syncLog() {
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
     const since = await dbGetMaxTs();
     lastSyncTs  = since;
-    const resp  = await fetch('/log?since=' + since);
+    const resp  = await fetch('/log?since=' + since, { signal: controller.signal });
     const text  = await resp.text();
+    clearTimeout(timeout);
     const rows  = parseLogCSV(text);
     if (rows.length) {
       await dbPutRows(rows);
@@ -717,12 +733,18 @@ let wasRunActive    = false;
 let wasSelectedMode = 0;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
 
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return;
+  pollInFlight = true;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
   try {
     const [st] = await Promise.all([
-      fetch('/status').then(r=>r.json()),
-      fetch('/history').then(r=>r.json())   // keep fetching history for future use
+      fetch('/status', { signal: controller.signal }).then(r=>r.json()),
+      fetch('/history', { signal: controller.signal }).then(r=>r.json())
     ]);
+    clearTimeout(timeout);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
     const outEl = document.getElementById('out');
@@ -816,14 +838,36 @@ async function poll() {
       document.getElementById('cfgOff').value  = st.offset;
     }
 
+    // Update duty cycle display from status
+    const dcStatusEl = document.getElementById('dcStatus');
+    if (dcStatusEl) {
+      const usedS   = (st.dcOnTimeMs  / 1000).toFixed(1);
+      const limitS  = ((st.dcPct / 100) * st.dcPeriodMs / 1000).toFixed(1);
+      const remS    = (st.dcRemainingMs / 1000).toFixed(1);
+      dcStatusEl.innerHTML = 'Used: ' + usedS + 's / ' + limitS + 's &bull; Remaining: ' + remS + 's'
+        + (st.dcForceOff ? ' <span class="badge off">DC LIMIT</span>' : '');
+    }
+    if (document.activeElement !== document.getElementById('dcPct'))
+      document.getElementById('dcPct').value = st.dcPct.toFixed(0);
+    if (document.activeElement !== document.getElementById('dcPeriodMs'))
+      document.getElementById('dcPeriodMs').value = st.dcPeriodMs;
+
     if (st.runActive) syncLog();
     if (st.runActive && st.selectedMode === 2) pollRamp();
-  } catch(e) { console.warn('poll error', e); }
+  } catch(e) {
+    clearTimeout(timeout);
+    console.warn('poll error', e);
+  } finally {
+    pollInFlight = false;
+  }
 }
 
 async function pollRamp() {
   try {
-    const rs = await fetch('/rampstatus').then(r => r.json());
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const rs = await fetch('/rampstatus', { signal: controller.signal }).then(r => r.json());
+    clearTimeout(timeout);
 
     if (rs.stepCount && rs.stepCount > 0) {
       runChartCurrentStep = rs.rampStep;
@@ -915,6 +959,22 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
   await fetch('/wifi', {method:'POST', body: new URLSearchParams(new FormData(e.target))});
   alert('WiFi saved. Device will reboot.');
 });
+
+async function saveDutyCycle() {
+  const pct = parseFloat(document.getElementById('dcPct').value);
+  const ms  = parseInt(document.getElementById('dcPeriodMs').value, 10);
+  if (isNaN(pct) || isNaN(ms)) { alert('Invalid values'); return; }
+  try {
+    const r = await fetch('/dutycycle', {
+      method: 'POST',
+      body: new URLSearchParams({ pct: pct.toFixed(1), period_ms: ms })
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    document.getElementById('dcMsg').textContent = 'Saved.';
+  } catch(e) {
+    document.getElementById('dcMsg').textContent = 'Failed: ' + e;
+  }
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function changeAuth() {
