@@ -611,6 +611,19 @@ void loop() {
       }
     }
 
+    // Periodically re-check the duty-cycle gate so it can cut the output
+    // mid-heating even when the control loop doesn't call applyHeater().
+    if (outputOn && !stopLatched) {
+      bool gated = dutyCycleGate(true);
+      if (!gated && outputOn) {
+        outputOn = false;
+        MOSFET_WRITE(false);
+        DBG("DC limit (loop): output cut (");
+        DBG(dcOnTimeThisPeriod);
+        DBGLN("ms used)");
+      }
+    }
+
     if (runActive) {
       uint32_t t_s = (uint32_t)((now - runStartMs) / 1000UL);
       float coastEst = (learnedCount > 0)
