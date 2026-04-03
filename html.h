@@ -20,13 +20,13 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   .badge{display:inline-block;padding:.2rem .6rem;border-radius:4px;font-size:.85rem}
   .on{background:#2ecc71;color:#111}.off{background:#e74c3c}.auto{background:#2980b9}
   .heat-badge{display:inline-block;padding:.25rem .7rem;border-radius:4px;font-size:.85rem;
-    background:#1a3a5c;color:#aaa;position:relative;vertical-align:middle}
+    background:#1a3a5c;color:#aaa;position:relative;vertical-align:middle;min-width:60px;text-align:center}
   .heat-badge.active{background:#0a2510;color:#2ecc71}
   .heat-badge.idle{background:#333;color:#555}
-  .heat-inner{display:inline-block;width:8px;height:8px;border-radius:2px;
-    background:#555;position:relative;left:-10px;top:1px;vertical-align:middle}
-  .heat-inner.on{background:#2ecc71;box-shadow:0 0 4px #2ecc71}
-  .heat-inner.off{background:#e74c3c;box-shadow:0 0 4px #e74c3c}
+  .heat-inner{display:inline-block;width:10px;height:10px;border-radius:2px;
+    background:#555;margin-left:4px;vertical-align:middle}
+  .heat-inner.on{background:#2ecc71;box-shadow:0 0 6px #2ecc71}
+  .heat-inner.off{background:#e74c3c;box-shadow:0 0 6px #e74c3c}
   #wifiSection{display:none}
   #logInfo{font-size:.85rem;color:#aaa;margin-top:.4rem}
 
@@ -828,14 +828,13 @@ async function poll() {
       heatEl.textContent = 'E-STOP';
       heatEl.className   = 'heat-badge off';
       heatDot.className  = 'heat-inner off';
+      heatDot.title      = '';
     } else if (st.heatRequested) {
-      heatEl.textContent = 'HEAT';
+      heatEl.innerHTML   = 'HEAT <span class="heat-inner ' + (st.output ? 'on' : 'off') + '" id="heatOutput"></span>';
       heatEl.className   = 'heat-badge active';
-      heatDot.className  = 'heat-inner ' + (st.output ? 'on' : 'off');
     } else {
-      heatEl.textContent = 'IDLE';
+      heatEl.innerHTML   = 'IDLE <span class="heat-inner off" id="heatOutput"></span>';
       heatEl.className   = 'heat-badge idle';
-      heatDot.className  = 'heat-inner off';
     }
 
     // E-stop panel
