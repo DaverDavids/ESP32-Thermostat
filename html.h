@@ -611,7 +611,7 @@ function drawRunChart() {
 
     const temps = rows.map(r => r.tempC);
     const sps   = rows.map(r => r.setpoint);
-    const outs  = rows.map(r => r.output || 0);
+    const outs  = rows.map(r => r.heat_requested || 0);
     const times = rows.map(r => r.t_s);
 
     const allVals = [...temps, ...sps, ...runChartStepTargets];
@@ -854,7 +854,7 @@ async function poll() {
     }
 
     // Update duty cycle display from status
-    drawDutyCycleBar(st.dcPct, st.dcPeriodMs, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff);
+    drawDutyCycleBar(st.dcPct, st.dcPeriodMs, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
     // Only overwrite input fields when device value actually changed (not user edits)
     const dcPctEl = document.getElementById('dcPct');
     const dcPerEl = document.getElementById('dcPeriodMs');
@@ -994,10 +994,12 @@ async function saveDutyCycle() {
 }
 
 // ── Duty cycle bar ──────────────────────────────────────────────────────────
-let dcBarState = { pct:100, periodMs:60000, onMs:0, remMs:0, forceOff:false };
+let dcBarState = { pct:100, periodMs:60000, onMs:0, remMs:0, forceOff:false, periodElapsedMs:0 };
+let dcBarLastPoll = 0;
 
-function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff) {
-  dcBarState = { pct, periodMs, onMs, remMs, forceOff };
+function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff, periodElapsedMs) {
+  dcBarState = { pct, periodMs, onMs, remMs, forceOff, periodElapsedMs: periodElapsedMs || 0 };
+  dcBarLastPoll = performance.now();
   const c = document.getElementById('dcBar');
   if (!c) return;
   const ctx = c.getContext('2d');
@@ -1010,10 +1012,9 @@ function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff) {
   const offPx = (offMs / periodMs) * (W - 2);
   const barY = 14, barH = 14;
 
-  // Off zone
+  // ON zone (left) / OFF zone (right)
   ctx.fillStyle = '#1a3a5c';
   ctx.fillRect(1, barY, allowedPx, barH);
-  // On zone
   ctx.fillStyle = '#2a1a1a';
   ctx.fillRect(1 + allowedPx, barY, offPx, barH);
 
@@ -1041,7 +1042,7 @@ function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff) {
   ctx.fillText('OFF ' + offLabel, 1 + allowedPx + offPx / 2, barY + 10);
 
   // Progress cursor (white bar)
-  const elapsed = periodMs - remMs;
+  const elapsed = periodElapsedMs || 0;
   const cursorPx = Math.min((elapsed / periodMs) * (W - 2), W - 2);
   ctx.fillStyle = forceOff ? '#e74c3c' : '#fff';
   ctx.fillRect(cursorPx - 1, barY - 2, 2, barH + 4);
@@ -1072,9 +1073,9 @@ function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff) {
     const offPx = (offMs / dcBarState.periodMs) * (W - 2);
     const barY = 14, barH = 14;
 
-    // Recompute elapsed from last known snapshot + real time
-    const baseElapsed = dcBarState.periodMs - dcBarState.remMs;
-    const elapsed = (baseElapsed + dt) % dcBarState.periodMs;
+    // Advance cursor from last poll snapshot by real elapsed time
+    const sincePoll = performance.now() - dcBarLastPoll;
+    const elapsed = (dcBarState.periodElapsedMs + sincePoll) % dcBarState.periodMs;
     const cursorPx = Math.min((elapsed / dcBarState.periodMs) * (W - 2), W - 2);
     const inOnZone = elapsed < allowedMs;
     const forceOff = dcBarState.forceOff && !inOnZone;

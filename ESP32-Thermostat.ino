@@ -1298,8 +1298,9 @@ void setupRoutes() {
              + ",\"dcPct\":"        + String(dutyCyclePct,  1)
              + ",\"dcPeriodMs\":"   + String(dutyCyclePeriodMs)
              + ",\"dcOnTimeMs\":"   + String(dcOnTimeThisPeriod)
-             + ",\"dcRemainingMs\":" + String(dcRemainingMs)
-             + ",\"dcForceOff\":"   + String(dcForceOff ? 1 : 0)
+              + ",\"dcRemainingMs\":" + String(dcRemainingMs)
+              + ",\"dcPeriodElapsedMs\":" + String(periodElapsedMs)
+              + ",\"dcForceOff\":"   + String(dcForceOff ? 1 : 0)
              + "}";
     server.send(200, "application/json", j);
   });
