@@ -19,6 +19,14 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   canvas{width:100%!important;max-height:200px}
   .badge{display:inline-block;padding:.2rem .6rem;border-radius:4px;font-size:.85rem}
   .on{background:#2ecc71;color:#111}.off{background:#e74c3c}.auto{background:#2980b9}
+  .heat-badge{display:inline-block;padding:.25rem .7rem;border-radius:4px;font-size:.85rem;
+    background:#1a3a5c;color:#aaa;position:relative;vertical-align:middle}
+  .heat-badge.active{background:#0a2510;color:#2ecc71}
+  .heat-badge.idle{background:#333;color:#555}
+  .heat-inner{display:inline-block;width:8px;height:8px;border-radius:2px;
+    background:#555;position:relative;left:-10px;top:1px;vertical-align:middle}
+  .heat-inner.on{background:#2ecc71;box-shadow:0 0 4px #2ecc71}
+  .heat-inner.off{background:#e74c3c;box-shadow:0 0 4px #e74c3c}
   #wifiSection{display:none}
   #logInfo{font-size:.85rem;color:#aaa;margin-top:.4rem}
 
@@ -64,7 +72,11 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   <div class="card">
     <h2>&#x1F321; Live Temperature</h2>
     <div class="big">Temp: <span id="temp">--</span> &deg;C</div>
-    <div style="margin-top:.4rem">Setpoint: <span id="sp">--</span> &deg;C &nbsp; Output: <span id="out" class="badge">--</span></div>
+    <div style="margin-top:.4rem">Setpoint: <span id="sp">--</span> &deg;C &nbsp;
+      <span class="heat-badge" id="heatApplied" title="Heat requested by profile">
+        <span class="heat-inner" id="heatOutput" title="Actual heater state"></span>
+      </span>
+    </div>
     <div id="manualControls" style="margin-top:.8rem;display:none;gap:.5rem;flex-wrap:wrap;">
       <button onclick="setManual('on')">Manual ON</button>
       <button onclick="setManual('off')" style="background:#555;">Manual OFF</button>
@@ -762,20 +774,22 @@ async function poll() {
     clearTimeout(timeout);
     document.getElementById('temp').textContent = st.temp.toFixed(1);
     document.getElementById('sp').textContent   = st.setpoint.toFixed(1);
-    const outEl = document.getElementById('out');
-    const modeNames = ['MANUAL', 'BANG-BANG', 'AUTO RAMP'];
+
+    // Heat applied / actual output indicator
+    const heatEl = document.getElementById('heatApplied');
+    const heatDot = document.getElementById('heatOutput');
     if (st.stopLatched) {
-      outEl.textContent = 'E-STOP';
-      outEl.className   = 'badge off';
-    } else if (st.selectedMode === 0) {
-      outEl.textContent = st.output ? 'ON' : 'OFF';
-      outEl.className   = 'badge ' + (st.output ? 'on' : 'off');
-    } else if (st.modeRunning) {
-      outEl.textContent = st.output ? 'ON' : 'OFF';
-      outEl.className   = 'badge ' + (st.output ? 'on' : 'off');
+      heatEl.textContent = 'E-STOP';
+      heatEl.className   = 'heat-badge off';
+      heatDot.className  = 'heat-inner off';
+    } else if (st.heatRequested) {
+      heatEl.textContent = 'HEAT';
+      heatEl.className   = 'heat-badge active';
+      heatDot.className  = 'heat-inner ' + (st.output ? 'on' : 'off');
     } else {
-      outEl.textContent = 'IDLE';
-      outEl.className   = 'badge off';
+      heatEl.textContent = 'IDLE';
+      heatEl.className   = 'heat-badge idle';
+      heatDot.className  = 'heat-inner off';
     }
 
     // E-stop panel
