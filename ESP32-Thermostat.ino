@@ -388,6 +388,8 @@ uint16_t cacheCount = 0;
 
 void openRunLog() {
   if (!spiffsOk) return;
+  // Truncate old log so each run starts fresh
+  SPIFFS.remove(LOG_PATH);
   runLogFile = SPIFFS.open(LOG_PATH, FILE_WRITE);
   if (!runLogFile) { DBGLN("SPIFFS open failed"); return; }
   runLogFile.println("t_s,tempC,setpoint,output,heat_requested,mode,ramp_state,step_idx,coast_ratio_est");

@@ -199,6 +199,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       <span style="color:#0f9;">&#9644; Temperature</span>
       <span style="color:#e94560;">&#9644; Setpoint</span>
       <span style="color:#f39c12;">&#9644; Step Targets</span>
+      <span style="color:rgba(46,204,113,0.4);">&#9644; Heater ON</span>
     </div>
     <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
   </div>
@@ -610,6 +611,7 @@ function drawRunChart() {
 
     const temps = rows.map(r => r.tempC);
     const sps   = rows.map(r => r.setpoint);
+    const outs  = rows.map(r => r.output || 0);
     const times = rows.map(r => r.t_s);
 
     const allVals = [...temps, ...sps, ...runChartStepTargets];
@@ -622,6 +624,19 @@ function drawRunChart() {
 
     const px = t => Math.round((t - tMin) / (tMax - tMin) * (w - 1));
     const py = v => Math.round(h - (v - yMin) / (yMax - yMin) * (h - 1));
+
+    // Output ON regions (shaded background)
+    ctx.fillStyle = 'rgba(46, 204, 113, 0.08)';
+    let onStart = -1;
+    for (let i = 0; i < outs.length; i++) {
+      if (outs[i] && onStart < 0) onStart = i;
+      if ((!outs[i] || i === outs.length - 1) && onStart >= 0) {
+        const x1 = px(times[onStart]);
+        const x2 = px(times[Math.min(i, outs.length - 1)]);
+        ctx.fillRect(x1, 0, Math.max(x2 - x1, 1), h);
+        onStart = -1;
+      }
+    }
 
     ctx.setLineDash([4, 6]);
     ctx.lineWidth = 1;
