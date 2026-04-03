@@ -284,7 +284,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       <input type="number" step="1000" min="1000" max="3600000" id="dcPeriodMs" value="60000">
     </label>
     <button onclick="saveDutyCycle()">Save Duty Cycle</button>
-    <div id="dcStatus" style="margin-top:.4rem;font-size:.85rem;color:#aaa;"></div>
+    <canvas id="dcBar" width="220" height="40" style="width:100%;height:40px;display:block;margin-top:.4rem;"></canvas>
     <div id="dcMsg" style="font-size:.85rem;color:#0f9;margin-top:.2rem;"></div>
   </div>
 </div>
@@ -839,14 +839,7 @@ async function poll() {
     }
 
     // Update duty cycle display from status
-    const dcStatusEl = document.getElementById('dcStatus');
-    if (dcStatusEl) {
-      const usedS   = (st.dcOnTimeMs  / 1000).toFixed(1);
-      const limitS  = ((st.dcPct / 100) * st.dcPeriodMs / 1000).toFixed(1);
-      const remS    = (st.dcRemainingMs / 1000).toFixed(1);
-      dcStatusEl.innerHTML = 'Used: ' + usedS + 's / ' + limitS + 's &bull; Remaining: ' + remS + 's'
-        + (st.dcForceOff ? ' <span class="badge off">DC LIMIT</span>' : '');
-    }
+    drawDutyCycleBar(st.dcPct, st.dcPeriodMs, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff);
     // Only overwrite input fields when device value actually changed (not user edits)
     const dcPctEl = document.getElementById('dcPct');
     const dcPerEl = document.getElementById('dcPeriodMs');
@@ -978,13 +971,132 @@ async function saveDutyCycle() {
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     document.getElementById('dcMsg').textContent = 'Saved.';
-    // Update lastDevice so poll() won't overwrite
     document.getElementById('dcPct').dataset.lastDevice = pct.toFixed(0);
     document.getElementById('dcPeriodMs').dataset.lastDevice = String(ms);
   } catch(e) {
     document.getElementById('dcMsg').textContent = 'Failed: ' + e;
   }
 }
+
+// ── Duty cycle bar ──────────────────────────────────────────────────────────
+let dcBarState = { pct:100, periodMs:60000, onMs:0, remMs:0, forceOff:false };
+
+function drawDutyCycleBar(pct, periodMs, onMs, remMs, forceOff) {
+  dcBarState = { pct, periodMs, onMs, remMs, forceOff };
+  const c = document.getElementById('dcBar');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const allowedMs = (pct / 100) * periodMs;
+  const offMs = periodMs - allowedMs;
+  const allowedPx = (allowedMs / periodMs) * (W - 2);
+  const offPx = (offMs / periodMs) * (W - 2);
+  const barY = 14, barH = 14;
+
+  // Off zone
+  ctx.fillStyle = '#1a3a5c';
+  ctx.fillRect(1, barY, allowedPx, barH);
+  // On zone
+  ctx.fillStyle = '#2a1a1a';
+  ctx.fillRect(1 + allowedPx, barY, offPx, barH);
+
+  // Border
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(1, barY, W - 2, barH);
+
+  // Divider line
+  ctx.strokeStyle = '#555';
+  ctx.setLineDash([2, 2]);
+  ctx.beginPath();
+  ctx.moveTo(1 + allowedPx, barY);
+  ctx.lineTo(1 + allowedPx, barY + barH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Labels
+  ctx.fillStyle = '#aaa';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  const onLabel = (allowedMs / 1000).toFixed(1) + 's';
+  const offLabel = (offMs / 1000).toFixed(1) + 's';
+  ctx.fillText('ON ' + onLabel, 1 + allowedPx / 2, barY + 10);
+  ctx.fillText('OFF ' + offLabel, 1 + allowedPx + offPx / 2, barY + 10);
+
+  // Progress cursor (white bar)
+  const elapsed = periodMs - remMs;
+  const cursorPx = Math.min((elapsed / periodMs) * (W - 2), W - 2);
+  ctx.fillStyle = forceOff ? '#e74c3c' : '#fff';
+  ctx.fillRect(cursorPx - 1, barY - 2, 2, barH + 4);
+
+  // Force-off indicator
+  if (forceOff) {
+    ctx.fillStyle = '#e74c3c';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('LIMIT', W - 3, 10);
+  }
+}
+
+// Animate the cursor between polls for smooth scrolling
+(function() {
+  let lastFrame = 0;
+  function tick(ts) {
+    if (!lastFrame) lastFrame = ts;
+    const dt = ts - lastFrame;
+    lastFrame = ts;
+    const c = document.getElementById('dcBar');
+    if (!c || dcBarState.periodMs <= 0) { requestAnimationFrame(tick); return; }
+    const ctx = c.getContext('2d');
+    const W = c.width, H = c.height;
+    const allowedMs = (dcBarState.pct / 100) * dcBarState.periodMs;
+    const offMs = dcBarState.periodMs - allowedMs;
+    const allowedPx = (allowedMs / dcBarState.periodMs) * (W - 2);
+    const offPx = (offMs / dcBarState.periodMs) * (W - 2);
+    const barY = 14, barH = 14;
+
+    // Recompute elapsed from last known snapshot + real time
+    const baseElapsed = dcBarState.periodMs - dcBarState.remMs;
+    const elapsed = (baseElapsed + dt) % dcBarState.periodMs;
+    const cursorPx = Math.min((elapsed / dcBarState.periodMs) * (W - 2), W - 2);
+    const inOnZone = elapsed < allowedMs;
+    const forceOff = dcBarState.forceOff && !inOnZone;
+
+    // Redraw bar
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#1a3a5c';
+    ctx.fillRect(1, barY, allowedPx, barH);
+    ctx.fillStyle = '#2a1a1a';
+    ctx.fillRect(1 + allowedPx, barY, offPx, barH);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(1, barY, W - 2, barH);
+    ctx.strokeStyle = '#555';
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(1 + allowedPx, barY);
+    ctx.lineTo(1 + allowedPx, barY + barH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('ON ' + (allowedMs / 1000).toFixed(1) + 's', 1 + allowedPx / 2, barY + 10);
+    ctx.fillText('OFF ' + (offMs / 1000).toFixed(1) + 's', 1 + allowedPx + offPx / 2, barY + 10);
+    ctx.fillStyle = forceOff ? '#e74c3c' : '#fff';
+    ctx.fillRect(cursorPx - 1, barY - 2, 2, barH + 4);
+    if (forceOff) {
+      ctx.fillStyle = '#e74c3c';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText('LIMIT', W - 3, 10);
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function changeAuth() {

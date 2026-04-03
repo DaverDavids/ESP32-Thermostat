@@ -480,8 +480,8 @@ struct BtnState {
 //      The duty cycle is enforced here (single chokepoint) so all code paths
 //      (manual, bang-bang, ramp) are equally protected.
 void applyHeater(bool requestOn) {
+  heatRequested = requestOn;
   if (stopLatched || !requestOn) {
-    // Shutting off: tell the duty-cycle tracker the burst ended.
     dutyCycleGate(false);
     outputOn = false;
     MOSFET_WRITE(false);
@@ -613,15 +613,22 @@ void loop() {
 
     // Periodically re-check the duty-cycle gate so it can cut the output
     // mid-heating even when the control loop doesn't call applyHeater().
-    if (outputOn && !stopLatched) {
+    // When the period resets and we still want heat, re-enable the output.
+    if (heatRequested && !stopLatched) {
       bool gated = dutyCycleGate(true);
-      if (!gated && outputOn) {
+      if (gated && !outputOn) {
+        outputOn = true;
+        MOSFET_WRITE(true);
+        DBG("DC period reset: output restored\n");
+      } else if (!gated && outputOn) {
         outputOn = false;
         MOSFET_WRITE(false);
         DBG("DC limit (loop): output cut (");
         DBG(dcOnTimeThisPeriod);
         DBGLN("ms used)");
       }
+    } else if (!heatRequested) {
+      dutyCycleGate(false);
     }
 
     if (runActive) {
@@ -927,6 +934,7 @@ void rampControlLoop() {
 
     case RS_IDLE:
       rampStep           = 0;
+      setpoint           = activeProfile.stepTargets[0];
       rampState          = RS_HEATING;
       rampStateEnteredMs = millis();
       rampFireStartTemp  = currentTemp;
@@ -946,6 +954,7 @@ void rampControlLoop() {
           rampCutoffTemp = currentTemp;
           rampPeakTemp   = currentTemp;
           rampState      = RS_COASTING;
+          setpoint = stepTarget;
           rampStateEnteredMs = millis();
           resetStabilityBuf();
           coastingDropCount = 0;
@@ -954,19 +963,20 @@ void rampControlLoop() {
         }
       }
 
-      if (currentTemp >= stepTarget) {
-        applyHeater(false);
-        rampCutoffTemp = currentTemp;
-        rampPeakTemp   = currentTemp;
-        rampOvershootAmt = 0.0f;
-        rampState = isFinalStep ? RS_FINAL_SOAK : RS_SOAKING;
-        if (rampState == RS_FINAL_SOAK) finalSoakStartMs = millis();
-        rampStateEnteredMs = millis();
-        resetStabilityBuf();
-        coastingDropCount = 0;
-        DBG("Ramp: hard cutoff (already past target), skip coast for step "); DBGLN(rampStep);
-        break;
-      }
+        if (currentTemp >= stepTarget) {
+          applyHeater(false);
+          rampCutoffTemp = currentTemp;
+          rampPeakTemp   = currentTemp;
+          rampOvershootAmt = 0.0f;
+          rampState = isFinalStep ? RS_FINAL_SOAK : RS_SOAKING;
+          setpoint = stepTarget;
+          if (rampState == RS_FINAL_SOAK) finalSoakStartMs = millis();
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          coastingDropCount = 0;
+          DBG("Ramp: hard cutoff (already past target), skip coast for step "); DBGLN(rampStep);
+          break;
+        }
       break;
     }
 
@@ -1022,19 +1032,20 @@ void rampControlLoop() {
       if (currentTemp > stepTarget + 3.0f) { applyHeater(false); }
 
       if (rampState == RS_OVERSHOOT_WAIT) {
-        // FIX: require temp to be within 5°C of target AND stable before
-        //      advancing.  resetStabilityBuf() was already called on entry to
-        //      this state from RS_COASTING, so the buffer only has samples
-        //      collected during the wait — no cold/pre-overshoot values bleed in.
-        if (currentTemp <= stepTarget + 5.0f && isStable()) {
+        // Once the temp has plateaued and is stable (falling or holding),
+        // advance to the next step — no need to wait for it to cool back
+        // down to within 5°C of the target.
+        if (isStable()) {
           if (isFinalStep) {
             rampState        = RS_FINAL_SOAK;
+            setpoint         = stepTarget;
             finalSoakStartMs = millis();
             rampStateEnteredMs = millis();
             resetStabilityBuf();
             DBGLN("Ramp: FINAL_SOAK started");
           } else {
             rampStep++;
+            setpoint          = activeProfile.stepTargets[rampStep];
             rampState         = RS_HEATING;
             rampFireStartTemp = currentTemp;
             rampStateEnteredMs = millis();
@@ -1048,12 +1059,14 @@ void rampControlLoop() {
         if (isStable()) {
           if (isFinalStep) {
             rampState        = RS_FINAL_SOAK;
+            setpoint         = stepTarget;
             finalSoakStartMs = millis();
             rampStateEnteredMs = millis();
             resetStabilityBuf();
             DBGLN("Ramp: FINAL_SOAK started");
           } else {
             rampStep++;
+            setpoint          = activeProfile.stepTargets[rampStep];
             rampState         = RS_HEATING;
             rampFireStartTemp = currentTemp;
             rampStateEnteredMs = millis();
