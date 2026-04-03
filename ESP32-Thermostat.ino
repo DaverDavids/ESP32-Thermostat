@@ -100,7 +100,7 @@ struct RampProfile {
   float   stepTargets[RAMP_MAX_STEPS]; // °C, last entry = finalTarget
   uint8_t stepCount;                   // total steps including final
   float   soakMinutes;                 // hold time at final temp
-  float   stabilityThreshC;            // °C change over 30s to call stable
+  float   stabilityThreshC;            // °C change over window to call stable
   float   coastBase;                   // coast ratio at 0°C (y-intercept of linear model)
   float   coastSlope;                  // change in coast ratio per 100°C (negative)
   bool    complete;                    // was this profile learned on a full run?
@@ -146,10 +146,15 @@ float     rampPeakTemp      = 0.0f;
 float     rampOvershootAmt  = 0.0f;
 unsigned long rampStateEnteredMs = 0;
 unsigned long finalSoakStartMs   = 0;
+
+// ─── Stability window ─────────────────────────────────────────────────────────
+// STABILITY_WINDOW samples × REPORT_MS ms/sample = total observation window.
+// At 500ms/sample: 60 samples = 30s, 120 samples = 60s.
 #define STABILITY_WINDOW 60
-float stabilityBuf[STABILITY_WINDOW];
-uint16_t stabilityIdx   = 0;
+float    stabilityBuf[STABILITY_WINDOW];
+uint16_t stabilityIdx    = 0;
 uint16_t stabilityFilled = 0;
+
 uint8_t coastingDropCount = 0;
 
 // Helpers (forward declarations)
@@ -157,6 +162,69 @@ float effectiveCoastRatio(float tempC);
 void refitCoastModel();
 bool isStable();
 void resetStabilityBuf();
+
+// ─── Duty-cycle limiter ───────────────────────────────────────────────────────
+// Limits the output to at most (dutyCyclePct/100) ON-time within every
+// dutyCyclePeriodMs rolling window.  Set dutyCyclePct=100 to disable.
+// Both values are persisted in Preferences under "dc_pct" / "dc_period".
+float    dutyCyclePct      = 100.0f;  // 0–100 %
+uint32_t dutyCyclePeriodMs = 60000UL; // 60 s default period
+
+// Rolling accounting: track when the current ON-burst started and how much
+// ON-time has already been consumed inside the current period window.
+unsigned long dcPeriodStartMs  = 0;   // start of the current period window
+uint32_t      dcOnTimeThisPeriod = 0; // ms the output has been ON so far this period
+unsigned long dcOnStartMs      = 0;   // when the current ON-burst began (0 = not ON)
+bool          dcForceOff       = false; // true when duty cap is exhausted for this period
+
+// Called every time MOSFET state changes or at each control tick to update
+// the rolling ON-time bookkeeping and enforce the duty cap.
+// Returns the gated value: true = heater should be physically on, false = off.
+bool dutyCycleGate(bool requested) {
+  if (dutyCyclePct >= 100.0f) {
+    // Feature disabled – pass through, no tracking needed.
+    dcForceOff = false;
+    return requested;
+  }
+
+  unsigned long now = millis();
+
+  // Roll the period window forward when it expires.
+  if ((now - dcPeriodStartMs) >= dutyCyclePeriodMs) {
+    dcPeriodStartMs    = now;
+    dcOnTimeThisPeriod = 0;
+    dcForceOff         = false;
+    dcOnStartMs        = 0;
+  }
+
+  // Accumulate ON-time: if the output is currently ON, add the elapsed time
+  // since the last call into dcOnTimeThisPeriod.
+  if (dcOnStartMs != 0) {
+    uint32_t burst = (uint32_t)(now - dcOnStartMs);
+    dcOnTimeThisPeriod += burst;
+    dcOnStartMs = now; // reset reference so we don't double-count
+  }
+
+  // Compute how many ms are allowed in this period.
+  uint32_t allowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+
+  if (dcOnTimeThisPeriod >= allowedMs) {
+    dcForceOff = true;
+  }
+
+  if (dcForceOff) {
+    dcOnStartMs = 0;   // don't track further ON-time until next period
+    return false;
+  }
+
+  if (requested) {
+    if (dcOnStartMs == 0) dcOnStartMs = now; // start tracking this burst
+    return true;
+  } else {
+    dcOnStartMs = 0;
+    return false;
+  }
+}
 
 // ─── Ramp support functions ───────────────────────────────────────────
 float effectiveCoastRatio(float tempC) {
@@ -277,6 +345,11 @@ bool     runActive  = false;
 unsigned long runStartMs = 0;
 File     runLogFile;
 
+// Flush log at most once every FLUSH_INTERVAL_MS to avoid blocking the
+// main loop on every sample.  A final flush is always done on closeRunLog().
+#define LOG_FLUSH_INTERVAL_MS 5000UL
+static unsigned long lastLogFlushMs = 0;
+
 #define CACHE_SIZE 64
 struct CacheSample {
   uint32_t t_s;
@@ -301,7 +374,10 @@ void openRunLog() {
 }
 
 void closeRunLog() {
-  if (runLogFile) { runLogFile.close(); }
+  if (runLogFile) {
+    runLogFile.flush();
+    runLogFile.close();
+  }
 }
 
 void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
@@ -319,7 +395,12 @@ void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
   runLogFile.print(ramp_state);   runLogFile.print(',');
   runLogFile.print(step_idx);     runLogFile.print(',');
   runLogFile.println(coast_ratio, 4);
-  runLogFile.flush();
+  // Throttled flush: avoids a blocking SPIFFS write on every 500ms sample.
+  unsigned long now = millis();
+  if (now - lastLogFlushMs >= LOG_FLUSH_INTERVAL_MS) {
+    runLogFile.flush();
+    lastLogFlushMs = now;
+  }
 }
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -359,22 +440,28 @@ bool otaStarted    = false;
 bool serverStarted = false;
 
 // ─── Ramp stability helpers ───────────────────────────────────────────
+// FIX: resetStabilityBuf() now zeroes the buffer contents so that no
+//      stale temperature values bleed into fresh stability checks.
+void resetStabilityBuf() {
+  stabilityIdx    = 0;
+  stabilityFilled = 0;
+  memset(stabilityBuf, 0, sizeof(stabilityBuf));
+}
+
+// isStable() appends currentTemp into the circular buffer, then returns
+// true only once STABILITY_WINDOW samples have been collected AND the
+// spread (max-min) across all those samples is within stabilityThreshC.
 bool isStable() {
   stabilityBuf[stabilityIdx % STABILITY_WINDOW] = currentTemp;
   stabilityIdx++;
   if (stabilityFilled < STABILITY_WINDOW) stabilityFilled++;
   if (stabilityFilled < STABILITY_WINDOW) return false;
   float mn = stabilityBuf[0], mx = stabilityBuf[0];
-  for (uint8_t i = 1; i < STABILITY_WINDOW; i++) {
+  for (uint16_t i = 1; i < STABILITY_WINDOW; i++) {
     if (stabilityBuf[i] < mn) mn = stabilityBuf[i];
     if (stabilityBuf[i] > mx) mx = stabilityBuf[i];
   }
   return (mx - mn) < activeProfile.stabilityThreshC;
-}
-
-void resetStabilityBuf() {
-  stabilityIdx    = 0;
-  stabilityFilled = 0;
 }
 
 // ─── Button state ─────────────────────────────────────────────────────────────
@@ -389,13 +476,24 @@ struct BtnState {
 } btns[3];
 
 // ─── Heater gatekeeper ─────────────────────────────────────────────────────────
+// FIX: applyHeater() now runs the duty-cycle gate before writing to the MOSFET.
+//      The duty cycle is enforced here (single chokepoint) so all code paths
+//      (manual, bang-bang, ramp) are equally protected.
 void applyHeater(bool requestOn) {
   if (stopLatched || !requestOn) {
+    // Shutting off: tell the duty-cycle tracker the burst ended.
+    dutyCycleGate(false);
     outputOn = false;
     MOSFET_WRITE(false);
   } else {
-    outputOn = true;
-    MOSFET_WRITE(true);
+    bool gated = dutyCycleGate(true);
+    outputOn = gated;
+    MOSFET_WRITE(gated);
+    if (!gated) {
+      DBG("DC limit: output suppressed (");
+      DBG(dcOnTimeThisPeriod);
+      DBGLN("ms used this period)");
+    }
   }
 }
 
@@ -418,6 +516,7 @@ void setup() {
 
   pinMode(PIN_MOSFET, OUTPUT);
   applyHeater(false);
+  dcPeriodStartMs = millis();
 
   uint8_t btnPins[] = { PIN_BTN_UP, PIN_BTN_DN, PIN_BTN_CTR };
   for (int i = 0; i < 3; i++) {
@@ -894,6 +993,8 @@ void rampControlLoop() {
           DBG("Ramp: skipping coast record, rise too small: "); DBGLN(rise);
         }
 
+        // FIX: record overshoot AFTER peak is confirmed (coastingDropCount >= 3)
+        // so the full actual peak is captured, not an early sample.
         rampOvershootAmt = max(0.0f, rampPeakTemp - stepTarget);
         DBG("Ramp: peak="); DBG(rampPeakTemp);
         DBG(" overshoot="); DBGLN(rampOvershootAmt);
@@ -911,6 +1012,10 @@ void rampControlLoop() {
       if (currentTemp > stepTarget + 3.0f) { applyHeater(false); }
 
       if (rampState == RS_OVERSHOOT_WAIT) {
+        // FIX: require temp to be within 5°C of target AND stable before
+        //      advancing.  resetStabilityBuf() was already called on entry to
+        //      this state from RS_COASTING, so the buffer only has samples
+        //      collected during the wait — no cold/pre-overshoot values bleed in.
         if (currentTemp <= stepTarget + 5.0f && isStable()) {
           if (isFinalStep) {
             rampState        = RS_FINAL_SOAK;
@@ -1025,6 +1130,10 @@ void loadPrefs() {
   savedPSK      = prefs.getString("psk",  MYPSK);
   webUser = prefs.getString("wuser", "admin");
   webPass = prefs.getString("wpass", "thermostat");
+  dutyCyclePct      = prefs.getFloat("dc_pct",    100.0f);
+  dutyCyclePeriodMs = prefs.getUInt ("dc_period",  60000UL);
+  dutyCyclePct      = constrain(dutyCyclePct, 1.0f, 100.0f);
+  dutyCyclePeriodMs = constrain((uint32_t)dutyCyclePeriodMs, 1000UL, 3600000UL);
   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
   activeProfile.name[31] = '\0';
   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
@@ -1053,6 +1162,8 @@ void savePrefs() {
   prefs.putString("psk",   savedPSK);
   prefs.putString("wuser", webUser);
   prefs.putString("wpass", webPass);
+  prefs.putFloat ("dc_pct",    dutyCyclePct);
+  prefs.putUInt  ("dc_period", dutyCyclePeriodMs);
   prefs.putString("rp_name",     activeProfile.name);
   prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
   prefs.putFloat ("rp_stab",     activeProfile.stabilityThreshC);
@@ -1085,6 +1196,10 @@ void setupRoutes() {
   });
 
   server.on("/status", HTTP_GET, []() {
+    unsigned long periodElapsedMs = millis() - dcPeriodStartMs;
+    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+    uint32_t dcRemainingMs = (dcAllowedMs > dcOnTimeThisPeriod)
+                           ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
     String j = "{\"temp\":"         + String(currentTemp,  1)
              + ",\"setpoint\":"     + String(setpoint,      1)
              + ",\"output\":"       + String(outputOn ? 1 : 0)
@@ -1095,6 +1210,11 @@ void setupRoutes() {
              + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
              + ",\"hysteresis\":"   + String(hysteresis,    1)
              + ",\"offset\":"       + String(probeOffset,   1)
+             + ",\"dcPct\":"        + String(dutyCyclePct,  1)
+             + ",\"dcPeriodMs\":"   + String(dutyCyclePeriodMs)
+             + ",\"dcOnTimeMs\":"   + String(dcOnTimeThisPeriod)
+             + ",\"dcRemainingMs\":" + String(dcRemainingMs)
+             + ",\"dcForceOff\":"   + String(dcForceOff ? 1 : 0)
              + "}";
     server.send(200, "application/json", j);
   });
@@ -1352,6 +1472,50 @@ void setupRoutes() {
       DBGLN("Run stopped");
     } else {
       server.send(400, "text/plain", "action must be start or stop"); return;
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // ── Duty cycle config route ───────────────────────────────────────────────
+  // GET  /dutycycle  → returns current settings as JSON
+  // POST /dutycycle  → accepts pct= (1–100) and period_ms= (1000–3600000)
+  server.on("/dutycycle", HTTP_GET, []() {
+    unsigned long periodElapsedMs = millis() - dcPeriodStartMs;
+    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+    uint32_t dcRemainingMs = (dcAllowedMs > dcOnTimeThisPeriod)
+                           ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
+    String j = "{\"pct\":"       + String(dutyCyclePct, 1)
+             + ",\"period_ms\":" + String(dutyCyclePeriodMs)
+             + ",\"onTimeMs\":"  + String(dcOnTimeThisPeriod)
+             + ",\"remainMs\":"  + String(dcRemainingMs)
+             + ",\"periodElapsedMs\":" + String(periodElapsedMs)
+             + ",\"forceOff\":"  + String(dcForceOff ? 1 : 0)
+             + "}";
+    server.send(200, "application/json", j);
+  });
+
+  server.on("/dutycycle", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    bool changed = false;
+    if (server.hasArg("pct")) {
+      float v = server.arg("pct").toFloat();
+      v = constrain(v, 1.0f, 100.0f);
+      dutyCyclePct = v;
+      changed = true;
+    }
+    if (server.hasArg("period_ms")) {
+      uint32_t v = (uint32_t)server.arg("period_ms").toInt();
+      v = constrain(v, 1000UL, 3600000UL);
+      dutyCyclePeriodMs = v;
+      changed = true;
+    }
+    if (changed) {
+      // Reset the period window immediately on setting change.
+      dcPeriodStartMs    = millis();
+      dcOnTimeThisPeriod = 0;
+      dcForceOff         = false;
+      dcOnStartMs        = 0;
+      savePrefs();
     }
     server.send(200, "text/plain", "OK");
   });
