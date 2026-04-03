@@ -847,10 +847,17 @@ async function poll() {
       dcStatusEl.innerHTML = 'Used: ' + usedS + 's / ' + limitS + 's &bull; Remaining: ' + remS + 's'
         + (st.dcForceOff ? ' <span class="badge off">DC LIMIT</span>' : '');
     }
-    if (document.activeElement !== document.getElementById('dcPct'))
-      document.getElementById('dcPct').value = st.dcPct.toFixed(0);
-    if (document.activeElement !== document.getElementById('dcPeriodMs'))
-      document.getElementById('dcPeriodMs').value = st.dcPeriodMs;
+    // Only overwrite input fields when device value actually changed (not user edits)
+    const dcPctEl = document.getElementById('dcPct');
+    const dcPerEl = document.getElementById('dcPeriodMs');
+    if (dcPctEl && dcPctEl.dataset.lastDevice !== String(st.dcPct.toFixed(0))) {
+      dcPctEl.value = st.dcPct.toFixed(0);
+      dcPctEl.dataset.lastDevice = st.dcPct.toFixed(0);
+    }
+    if (dcPerEl && dcPerEl.dataset.lastDevice !== String(st.dcPeriodMs)) {
+      dcPerEl.value = st.dcPeriodMs;
+      dcPerEl.dataset.lastDevice = String(st.dcPeriodMs);
+    }
 
     if (st.runActive) syncLog();
     if (st.runActive && st.selectedMode === 2) pollRamp();
@@ -971,6 +978,9 @@ async function saveDutyCycle() {
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     document.getElementById('dcMsg').textContent = 'Saved.';
+    // Update lastDevice so poll() won't overwrite
+    document.getElementById('dcPct').dataset.lastDevice = pct.toFixed(0);
+    document.getElementById('dcPeriodMs').dataset.lastDevice = String(ms);
   } catch(e) {
     document.getElementById('dcMsg').textContent = 'Failed: ' + e;
   }
