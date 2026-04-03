@@ -400,6 +400,7 @@ void closeRunLog() {
   if (runLogFile) {
     runLogFile.flush();
     runLogFile.close();
+    runLogFile = File();
   }
 }
 

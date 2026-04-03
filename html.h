@@ -395,12 +395,58 @@ async function syncLog() {
     const text  = await resp.text();
     clearTimeout(timeout);
     const rows  = parseLogCSV(text);
+
+    // Detect new run: device returned 0 rows but we have stored data with
+    // timestamps higher than any the device could produce in a fresh run.
+    // This means the device started a new run (t_s reset to 0) and our
+    // old maxTs is filtering out all new rows.
+    if (!rows.length && since > 0) {
+      const checkCtrl = new AbortController();
+      const checkT = setTimeout(() => checkCtrl.abort(), 4000);
+      const checkResp = await fetch('/log?since=0', { signal: checkCtrl.signal });
+      const checkText = await checkResp.text();
+      clearTimeout(checkT);
+      const checkRows = parseLogCSV(checkText);
+      if (checkRows.length && checkRows[checkRows.length - 1].t_s < since) {
+        // New run detected — clear old data and re-pull
+        await dbClear();
+        if (checkRows.length) {
+          await dbPutRows(checkRows);
+          updateLogInfo();
+        }
+        drawRunChart();
+        return;
+      }
+    }
+
     if (rows.length) {
       await dbPutRows(rows);
       updateLogInfo();
     }
     drawRunChart();
   } catch(e) { console.warn('syncLog error', e); }
+}
+
+// Periodic full re-sync every 60s to catch any incremental drift
+let syncCounter = 0;
+async function periodicFullSync() {
+  syncCounter++;
+  if (syncCounter % 60 === 0) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      const resp = await fetch('/log?since=0', { signal: controller.signal });
+      const text = await resp.text();
+      clearTimeout(timeout);
+      const rows = parseLogCSV(text);
+      if (rows.length) {
+        await dbClear();
+        await dbPutRows(rows);
+        updateLogInfo();
+        drawRunChart();
+      }
+    } catch(e) { console.warn('periodicFullSync error', e); }
+  }
 }
 
 async function rePullLog() {
@@ -881,7 +927,7 @@ async function poll() {
       dcPerEl.dataset.lastDevice = String(st.dcPeriodMs);
     }
 
-    if (st.runActive) syncLog();
+    if (st.runActive) { syncLog(); periodicFullSync(); }
     if (st.runActive && st.selectedMode === 2) pollRamp();
   } catch(e) {
     clearTimeout(timeout);
