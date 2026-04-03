@@ -762,11 +762,8 @@ void updateButtons() {
           // Button released — short press confirmed
           btns[i].phase = BTN_IDLE;
           if (i == 2) {
-            // ── FIX: always register every short press toward e-stop counter ──
             registerEstopPress();
-
-            // If e-stop just triggered above, skip mode/heater logic
-            if (estopPressCount == 0 && stopLatched) break;
+            if (estopPressCount == 0) break;
 
             // Normal (non-latched) short press action
             if (!stopLatched) {
