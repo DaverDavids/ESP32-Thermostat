@@ -350,12 +350,17 @@ File     runLogFile;
 #define LOG_FLUSH_INTERVAL_MS 5000UL
 static unsigned long lastLogFlushMs = 0;
 
+// heat_requested = what the ramp/control algorithm asked for (profile intent).
+// output         = what was actually delivered to the MOSFET (may differ when
+//                  the duty-cycle limiter is suppressing the output).
+// Logging both lets you strip duty-cycle artefacts when analysing ramp behaviour.
 #define CACHE_SIZE 64
 struct CacheSample {
   uint32_t t_s;
   float    tC;
   float    sp;
-  uint8_t  output;
+  uint8_t  output;          // physical MOSFET state (gated by duty-cycle)
+  uint8_t  heat_requested;  // profile intent — 1 when ramp/BB wants heat on
   uint8_t  mode;
   uint8_t  ramp_state;
   uint8_t  step_idx;
@@ -369,7 +374,7 @@ void openRunLog() {
   if (!spiffsOk) return;
   runLogFile = SPIFFS.open(LOG_PATH, FILE_WRITE);
   if (!runLogFile) { DBGLN("SPIFFS open failed"); return; }
-  runLogFile.println("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est");
+  runLogFile.println("t_s,tempC,setpoint,output,heat_requested,mode,ramp_state,step_idx,coast_ratio_est");
   DBGLN("Run log opened");
 }
 
@@ -380,20 +385,25 @@ void closeRunLog() {
   }
 }
 
-void appendRunLog(uint32_t t_s, float tC, float sp, uint8_t output,
-                  uint8_t mode, uint8_t ramp_state, uint8_t step_idx, float coast_ratio) {
-  sampleCache[cacheHead % CACHE_SIZE] = { t_s, tC, sp, output, mode, ramp_state, step_idx, coast_ratio };
+void appendRunLog(uint32_t t_s, float tC, float sp,
+                  uint8_t output, uint8_t heat_req,
+                  uint8_t mode, uint8_t ramp_state,
+                  uint8_t step_idx, float coast_ratio) {
+  sampleCache[cacheHead % CACHE_SIZE] = {
+    t_s, tC, sp, output, heat_req, mode, ramp_state, step_idx, coast_ratio
+  };
   cacheHead++;
   if (cacheCount < CACHE_SIZE) cacheCount++;
 
   if (!spiffsOk || !runLogFile) return;
-  runLogFile.print(t_s);          runLogFile.print(',');
-  runLogFile.print(tC, 2);       runLogFile.print(',');
-  runLogFile.print(sp, 1);       runLogFile.print(',');
-  runLogFile.print(output);       runLogFile.print(',');
-  runLogFile.print(mode);         runLogFile.print(',');
-  runLogFile.print(ramp_state);   runLogFile.print(',');
-  runLogFile.print(step_idx);     runLogFile.print(',');
+  runLogFile.print(t_s);            runLogFile.print(',');
+  runLogFile.print(tC, 2);         runLogFile.print(',');
+  runLogFile.print(sp, 1);         runLogFile.print(',');
+  runLogFile.print(output);         runLogFile.print(',');
+  runLogFile.print(heat_req);       runLogFile.print(',');
+  runLogFile.print(mode);           runLogFile.print(',');
+  runLogFile.print(ramp_state);     runLogFile.print(',');
+  runLogFile.print(step_idx);       runLogFile.print(',');
   runLogFile.println(coast_ratio, 4);
   // Throttled flush: avoids a blocking SPIFFS write on every 500ms sample.
   unsigned long now = millis();
@@ -507,7 +517,7 @@ void controlLoop();
 void rampControlLoop();
 void updateButtons(); void updateDisplay();
 void openRunLog();
-void appendRunLog(uint32_t, float, float, uint8_t, uint8_t, uint8_t, uint8_t, float);
+void appendRunLog(uint32_t, float, float, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, float);
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
@@ -636,7 +646,9 @@ void loop() {
       float coastEst = (learnedCount > 0)
         ? effectiveCoastRatio(currentTemp)
         : activeProfile.coastBase;
-      appendRunLog(t_s, currentTemp, setpoint, outputOn ? 1 : 0,
+      appendRunLog(t_s, currentTemp, setpoint,
+                   outputOn       ? 1 : 0,   // physical MOSFET state
+                   heatRequested  ? 1 : 0,   // profile intent (pre-duty-gate)
                    (uint8_t)selectedMode, (uint8_t)rampState, rampStep, coastEst);
     }
   }
@@ -1226,6 +1238,7 @@ void setupRoutes() {
     String j = "{\"temp\":"         + String(currentTemp,  1)
              + ",\"setpoint\":"     + String(setpoint,      1)
              + ",\"output\":"       + String(outputOn ? 1 : 0)
+             + ",\"heatRequested\":" + String(heatRequested ? 1 : 0)
              + ",\"selectedMode\":" + String((int)selectedMode)
              + ",\"modeRunning\":"  + String(modeRunning ? 1 : 0)
              + ",\"stopLatched\":"  + String(stopLatched ? 1 : 0)
@@ -1556,7 +1569,7 @@ void setupRoutes() {
         server.sendHeader("Content-Type", "text/plain");
         server.sendHeader("Connection", "close");
         server.send(200, "text/plain", "");
-        server.sendContent("t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n");
+        server.sendContent("t_s,tempC,setpoint,output,heat_requested,mode,ramp_state,step_idx,coast_ratio_est\n");
         String line;
         bool firstLine = true;
         while (f.available()) {
@@ -1573,14 +1586,16 @@ void setupRoutes() {
         return;
       }
     }
-    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    String out = "t_s,tempC,setpoint,output,heat_requested,mode,ramp_state,step_idx,coast_ratio_est\n";
     uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
     uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
     for (uint16_t i = 0; i < count; i++) {
       CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
       if (s.t_s > since) {
         out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
-             + "," + String(s.output) + "," + String(s.mode)
+             + "," + String(s.output)
+             + "," + String(s.heat_requested)
+             + "," + String(s.mode)
              + "," + String(s.ramp_state) + "," + String(s.step_idx)
              + "," + String(s.coast_ratio, 4) + "\n";
       }
@@ -1607,13 +1622,15 @@ void setupRoutes() {
         return;
       }
     }
-    String out = "t_s,tempC,setpoint,output,mode,ramp_state,step_idx,coast_ratio_est\n";
+    String out = "t_s,tempC,setpoint,output,heat_requested,mode,ramp_state,step_idx,coast_ratio_est\n";
     uint16_t start = (cacheCount < CACHE_SIZE) ? 0 : cacheHead % CACHE_SIZE;
     uint16_t count = min(cacheCount, (uint16_t)CACHE_SIZE);
     for (uint16_t i = 0; i < count; i++) {
       CacheSample& s = sampleCache[(start + i) % CACHE_SIZE];
       out += String(s.t_s) + "," + String(s.tC, 2) + "," + String(s.sp, 1)
-           + "," + String(s.output) + "," + String(s.mode)
+           + "," + String(s.output)
+           + "," + String(s.heat_requested)
+           + "," + String(s.mode)
            + "," + String(s.ramp_state) + "," + String(s.step_idx)
            + "," + String(s.coast_ratio, 4) + "\n";
     }
