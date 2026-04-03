@@ -998,6 +998,7 @@ void rampControlLoop() {
           rampStateEnteredMs = millis();
           resetStabilityBuf();
           coastingDropCount = 0;
+          soakHeaterOffMs  = 0;
           DBG("Ramp: COASTING, cutoff="); DBGLN(rampCutoffTemp);
           break;
         }
@@ -1014,6 +1015,7 @@ void rampControlLoop() {
           rampStateEnteredMs = millis();
           resetStabilityBuf();
           coastingDropCount = 0;
+          soakHeaterOffMs  = 0;
           DBG("Ramp: hard cutoff (already past target), skip coast for step "); DBGLN(rampStep);
           break;
         }
@@ -1060,6 +1062,7 @@ void rampControlLoop() {
         DBG(" overshoot="); DBGLN(rampOvershootAmt);
 
         resetStabilityBuf();
+        soakHeaterOffMs = 0;
         // FIX: lowered overshoot threshold from 10°C to 5°C.
         // A +7.5°C overshoot is significant enough to route to RS_OVERSHOOT_WAIT
         // so the temperature can fall back toward the target before re-heating.
@@ -1071,12 +1074,18 @@ void rampControlLoop() {
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT: {
-      // FIX: tightened soak bang-bang hysteresis from ±3°C to ±0.8°C.
-      // The previous ±3°C swing (6°C peak-to-peak) was wider than
-      // stabilityThreshC (2°C), making isStable() impossible to satisfy.
-      // ±0.8°C gives a 1.6°C swing that fits inside the 2°C window.
-      if (currentTemp < stepTarget - 0.8f) { applyHeater(true);  }
-      if (currentTemp > stepTarget + 0.8f) { applyHeater(false); }
+      // Coast-aware refire: compute cutoff the same way the initial ramp does.
+      // This prevents thermal mass from causing runaway on every refire.
+      float soakCutoff = stepTarget - effectiveCoastRatio(stepTarget)
+                                     * (stepTarget - rampFireStartTemp);
+      if (!outputOn && currentTemp < stepTarget - 2.0f) {
+          rampFireStartTemp = currentTemp;   // reset fire baseline for this refire
+          applyHeater(true);
+      }
+      if (outputOn && currentTemp >= soakCutoff) {
+          rampCutoffTemp = currentTemp;      // record actual cutoff for learning
+          applyHeater(false);                // coast from here
+      }
 
       // FIX: gate isStable() behind a settle delay after the heater turns off.
       // Oscillation samples written while the heater is cycling poison the
@@ -1104,6 +1113,17 @@ void rampControlLoop() {
           soakHeaterOffMs  = 0;
           DBGLN("Ramp: FINAL_SOAK started");
         } else {
+          // FIX: learn coast ratio from soak refire overshoots
+          if (rampPeakTemp > stepTarget) {
+            float refireCoast = (rampPeakTemp - rampCutoffTemp) /
+                                max(stepTarget - rampFireStartTemp, 1.0f);
+            if (rampStep > 0 && rampStep <= MAX_LEARNED_STEPS) {
+              learnedCoastRatio[rampStep - 1] = max(learnedCoastRatio[rampStep - 1], refireCoast);
+              refitCoastModel();
+              DBG("Refire coast updated: "); DBGLN(refireCoast);
+            }
+          }
+
           rampStep++;
           setpoint          = activeProfile.stepTargets[rampStep];
           rampState         = RS_HEATING;
