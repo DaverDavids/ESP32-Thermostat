@@ -157,6 +157,22 @@ uint16_t stabilityFilled = 0;
 
 uint8_t coastingDropCount = 0;
 
+// FIX: Track when the heater was last turned off during soak so that
+// isStable() is only called (and samples only written) after the heater
+// has been off long enough for the temperature to settle.  This prevents
+// the oscillation spikes from the bang-bang cycle poisoning the stability
+// buffer and continuously resetting the effective stability clock.
+// Value is set to millis() in applyHeater(false) and reset to 0 in
+// applyHeater(true).  The gate threshold is SOAK_SETTLE_MS.
+unsigned long soakHeaterOffMs  = 0;   // millis() when heater last turned off in soak
+#define       SOAK_SETTLE_MS   12000UL // wait 12 s after heater-off before sampling stability
+
+// FIX: Maximum time to spend in RS_SOAKING or RS_OVERSHOOT_WAIT before
+// forcibly advancing to the next step.  Prevents a permanent deadlock if
+// the sensor is noisy or the thermal mass is so large that true stability
+// is never achieved within a reasonable run time.
+#define SOAK_TIMEOUT_MS  600000UL // 10 minutes
+
 // Helpers (forward declarations)
 float effectiveCoastRatio(float tempC);
 void refitCoastModel();
@@ -489,16 +505,26 @@ struct BtnState {
 // FIX: applyHeater() now runs the duty-cycle gate before writing to the MOSFET.
 //      The duty cycle is enforced here (single chokepoint) so all code paths
 //      (manual, bang-bang, ramp) are equally protected.
+// FIX: applyHeater(false) records the time the heater was turned off so that
+//      the soak stability gate (soakHeaterOffMs) can enforce a settle delay
+//      before isStable() is allowed to sample.
 void applyHeater(bool requestOn) {
   heatRequested = requestOn;
   if (stopLatched || !requestOn) {
     dutyCycleGate(false);
     outputOn = false;
     MOSFET_WRITE(false);
+    // Record the heater-off timestamp for the soak settle guard.
+    // Only update when actually transitioning to off (or staying off).
+    if (soakHeaterOffMs == 0) soakHeaterOffMs = millis();
   } else {
     bool gated = dutyCycleGate(true);
     outputOn = gated;
     MOSFET_WRITE(gated);
+    // Reset the settle timer whenever the heater fires — oscillation
+    // samples taken while the heater is on (or just after it turns off)
+    // must not count toward stability.
+    soakHeaterOffMs = 0;
     if (!gated) {
       DBG("DC limit: output suppressed (");
       DBG(dcOnTimeThisPeriod);
@@ -828,6 +854,7 @@ void updateButtons() {
                   finalSoakStartMs = 0;
                   resetStabilityBuf();
                   coastingDropCount = 0;
+                  soakHeaterOffMs   = 0;
                   memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
                   memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
                   memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
@@ -952,6 +979,7 @@ void rampControlLoop() {
       rampFireStartTemp  = currentTemp;
       resetStabilityBuf();
       coastingDropCount  = 0;
+      soakHeaterOffMs    = 0;
       applyHeater(true);
       DBGLN("Ramp: HEATING step 0");
       return;
@@ -1032,7 +1060,10 @@ void rampControlLoop() {
         DBG(" overshoot="); DBGLN(rampOvershootAmt);
 
         resetStabilityBuf();
-        rampState = (rampOvershootAmt > 10.0f) ? RS_OVERSHOOT_WAIT : RS_SOAKING;
+        // FIX: lowered overshoot threshold from 10°C to 5°C.
+        // A +7.5°C overshoot is significant enough to route to RS_OVERSHOOT_WAIT
+        // so the temperature can fall back toward the target before re-heating.
+        rampState = (rampOvershootAmt > 5.0f) ? RS_OVERSHOOT_WAIT : RS_SOAKING;
         rampStateEnteredMs = millis();
       }
       break;
@@ -1040,53 +1071,49 @@ void rampControlLoop() {
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT: {
-      if (currentTemp < stepTarget - 3.0f) { applyHeater(true);  }
-      if (currentTemp > stepTarget + 3.0f) { applyHeater(false); }
+      // FIX: tightened soak bang-bang hysteresis from ±3°C to ±0.8°C.
+      // The previous ±3°C swing (6°C peak-to-peak) was wider than
+      // stabilityThreshC (2°C), making isStable() impossible to satisfy.
+      // ±0.8°C gives a 1.6°C swing that fits inside the 2°C window.
+      if (currentTemp < stepTarget - 0.8f) { applyHeater(true);  }
+      if (currentTemp > stepTarget + 0.8f) { applyHeater(false); }
 
-      if (rampState == RS_OVERSHOOT_WAIT) {
-        // Once the temp has plateaued and is stable (falling or holding),
-        // advance to the next step — no need to wait for it to cool back
-        // down to within 5°C of the target.
-        if (isStable()) {
-          if (isFinalStep) {
-            rampState        = RS_FINAL_SOAK;
-            setpoint         = stepTarget;
-            finalSoakStartMs = millis();
-            rampStateEnteredMs = millis();
-            resetStabilityBuf();
-            DBGLN("Ramp: FINAL_SOAK started");
-          } else {
-            rampStep++;
-            setpoint          = activeProfile.stepTargets[rampStep];
-            rampState         = RS_HEATING;
-            rampFireStartTemp = currentTemp;
-            rampStateEnteredMs = millis();
-            resetStabilityBuf();
-            coastingDropCount = 0;
-            applyHeater(true);
-            DBG("Ramp: HEATING step "); DBGLN(rampStep);
-          }
-        }
-      } else {
-        if (isStable()) {
-          if (isFinalStep) {
-            rampState        = RS_FINAL_SOAK;
-            setpoint         = stepTarget;
-            finalSoakStartMs = millis();
-            rampStateEnteredMs = millis();
-            resetStabilityBuf();
-            DBGLN("Ramp: FINAL_SOAK started");
-          } else {
-            rampStep++;
-            setpoint          = activeProfile.stepTargets[rampStep];
-            rampState         = RS_HEATING;
-            rampFireStartTemp = currentTemp;
-            rampStateEnteredMs = millis();
-            resetStabilityBuf();
-            coastingDropCount = 0;
-            applyHeater(true);
-            DBG("Ramp: HEATING step "); DBGLN(rampStep);
-          }
+      // FIX: gate isStable() behind a settle delay after the heater turns off.
+      // Oscillation samples written while the heater is cycling poison the
+      // stability buffer.  Only sample once the temperature has had time to
+      // settle (SOAK_SETTLE_MS after the last heater-off event).
+      bool settled = (soakHeaterOffMs != 0) &&
+                     ((millis() - soakHeaterOffMs) >= SOAK_SETTLE_MS);
+
+      // FIX: 10-minute timeout fallback so the step is never permanently stuck.
+      bool soakTimedOut = (millis() - rampStateEnteredMs) >= SOAK_TIMEOUT_MS;
+
+      if (soakTimedOut) {
+        DBG("Ramp: soak timeout, forcing advance at step "); DBGLN(rampStep);
+      }
+
+      bool advance = soakTimedOut || (settled && isStable());
+
+      if (advance) {
+        if (isFinalStep) {
+          rampState        = RS_FINAL_SOAK;
+          setpoint         = stepTarget;
+          finalSoakStartMs = millis();
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          soakHeaterOffMs  = 0;
+          DBGLN("Ramp: FINAL_SOAK started");
+        } else {
+          rampStep++;
+          setpoint          = activeProfile.stepTargets[rampStep];
+          rampState         = RS_HEATING;
+          rampFireStartTemp = currentTemp;
+          rampStateEnteredMs = millis();
+          resetStabilityBuf();
+          coastingDropCount = 0;
+          soakHeaterOffMs   = 0;
+          applyHeater(true);
+          DBG("Ramp: HEATING step "); DBGLN(rampStep);
         }
       }
       break;
@@ -1494,6 +1521,7 @@ void setupRoutes() {
         finalSoakStartMs  = 0;
         resetStabilityBuf();
         coastingDropCount = 0;
+        soakHeaterOffMs   = 0;
         memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
         memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
         memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
