@@ -217,21 +217,6 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
-<!-- ── Run Chart (full width) ─────────────────────────────────────────────── -->
-<div class="row row-1">
-  <div class="card">
-    <h2>&#x1F4CA; Run Chart</h2>
-    <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
-    <div id="chartLegend" style="font-size:.8rem;color:#aaa;margin-top:.3rem;display:flex;gap:1rem;flex-wrap:wrap;">
-      <span style="color:#0f9;">&#9644; Temperature</span>
-      <span style="color:#e94560;">&#9644; Setpoint</span>
-      <span style="color:#f39c12;">&#9644; Step Targets</span>
-      <span style="color:rgba(46,204,113,0.4);">&#9644; Heater ON</span>
-    </div>
-    <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
-  </div>
-</div>
-
 <!-- ── Run Summary ─────────────────────────────────────────────────────────── -->
 <div class="row row-1">
   <div class="card" id="runSummaryPanel" style="display:none;">
