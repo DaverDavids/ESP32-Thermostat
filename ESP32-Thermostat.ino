@@ -181,10 +181,10 @@ void resetStabilityBuf();
 
 // ─── Duty-cycle limiter ───────────────────────────────────────────────────────
 // Limits the output to at most (dutyCyclePct/100) ON-time within every
-// dutyCyclePeriodMs rolling window.  Set dutyCyclePct=100 to disable.
+// dutyCyclePeriodSec rolling window.  Set dutyCyclePct=100 to disable.
 // Both values are persisted in Preferences under "dc_pct" / "dc_period".
 float    dutyCyclePct      = 100.0f;  // 0–100 %
-uint32_t dutyCyclePeriodMs = 60000UL; // 60 s default period
+uint32_t dutyCyclePeriodSec = 60UL;   // 60 s default period
 
 // Rolling accounting: track when the current ON-burst started and how much
 // ON-time has already been consumed inside the current period window.
@@ -193,54 +193,54 @@ uint32_t      dcOnTimeThisPeriod = 0; // ms the output has been ON so far this p
 unsigned long dcOnStartMs      = 0;   // when the current ON-burst began (0 = not ON)
 bool          dcForceOff       = false; // true when duty cap is exhausted for this period
 
-// Called every time MOSFET state changes or at each control tick to update
-// the rolling ON-time bookkeeping and enforce the duty cap.
-// Returns the gated value: true = heater should be physically on, false = off.
-bool dutyCycleGate(bool requested) {
-  if (dutyCyclePct >= 100.0f) {
-    // Feature disabled – pass through, no tracking needed.
-    dcForceOff = false;
-    return requested;
-  }
+    // Called every time MOSFET state changes or at each control tick to update
+    // the rolling ON-time bookkeeping and enforce the duty cap.
+    // Returns the gated value: true = heater should be physically on, false = off.
+    bool dutyCycleGate(bool requested) {
+      if (dutyCyclePct >= 100.0f) {
+        // Feature disabled – pass through, no tracking needed.
+        dcForceOff = false;
+        return requested;
+      }
 
-  unsigned long now = millis();
+      unsigned long now = millis();
 
-  // Roll the period window forward when it expires.
-  if ((now - dcPeriodStartMs) >= dutyCyclePeriodMs) {
-    dcPeriodStartMs    = now;
-    dcOnTimeThisPeriod = 0;
-    dcForceOff         = false;
-    dcOnStartMs        = 0;
-  }
+      // Roll the period window forward when it expires.
+      if ((now - dcPeriodStartMs) >= (dutyCyclePeriodSec * 1000UL)) {
+        dcPeriodStartMs    = now;
+        dcOnTimeThisPeriod = 0;
+        dcForceOff         = false;
+        dcOnStartMs        = 0;
+      }
 
-  // Accumulate ON-time: if the output is currently ON, add the elapsed time
-  // since the last call into dcOnTimeThisPeriod.
-  if (dcOnStartMs != 0) {
-    uint32_t burst = (uint32_t)(now - dcOnStartMs);
-    dcOnTimeThisPeriod += burst;
-    dcOnStartMs = now; // reset reference so we don't double-count
-  }
+      // Accumulate ON-time: if the output is currently ON, add the elapsed time
+      // since the last call into dcOnTimeThisPeriod.
+      if (dcOnStartMs != 0) {
+        uint32_t burst = (uint32_t)(now - dcOnStartMs);
+        dcOnTimeThisPeriod += burst;
+        dcOnStartMs = now; // reset reference so we don't double-count
+      }
 
-  // Compute how many ms are allowed in this period.
-  uint32_t allowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+      // Compute how many ms are allowed in this period.
+      uint32_t allowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)(dutyCyclePeriodSec * 1000));
 
-  if (dcOnTimeThisPeriod >= allowedMs) {
-    dcForceOff = true;
-  }
+      if (dcOnTimeThisPeriod >= allowedMs) {
+        dcForceOff = true;
+      }
 
-  if (dcForceOff) {
-    dcOnStartMs = 0;   // don't track further ON-time until next period
-    return false;
-  }
+      if (dcForceOff) {
+        dcOnStartMs = 0;   // don't track further ON-time until next period
+        return false;
+      }
 
-  if (requested) {
-    if (dcOnStartMs == 0) dcOnStartMs = now; // start tracking this burst
-    return true;
-  } else {
-    dcOnStartMs = 0;
-    return false;
-  }
-}
+      if (requested) {
+        if (dcOnStartMs == 0) dcOnStartMs = now; // start tracking this burst
+        return true;
+      } else {
+        dcOnStartMs = 0;
+        return false;
+      }
+    }
 
 // ─── Ramp support functions ───────────────────────────────────────────
 float effectiveCoastRatio(float tempC) {
@@ -653,7 +653,7 @@ void loop() {
     // Periodically re-check the duty-cycle gate so it can cut the output
     // mid-heating even when the control loop doesn't call applyHeater().
     // When the period resets and we still want heat, re-enable the output.
-    if (heatRequested && !stopLatched) {
+    if (heatRequested && !stopLatched && modeRunning) {
       bool gated = dutyCycleGate(true);
       if (gated && !outputOn) {
         outputOn = true;
@@ -1163,6 +1163,8 @@ void rampControlLoop() {
 
     case RS_DONE:
       applyHeater(false);
+      if (runActive)   { runActive   = false; closeRunLog(); }
+      if (modeRunning) { modeRunning = false; }
       break;
   }
 }
@@ -1215,27 +1217,27 @@ void loadPrefs() {
   savedPSK      = prefs.getString("psk",  MYPSK);
   webUser = prefs.getString("wuser", "admin");
   webPass = prefs.getString("wpass", "thermostat");
-  dutyCyclePct      = prefs.getFloat("dc_pct",    100.0f);
-  dutyCyclePeriodMs = prefs.getUInt ("dc_period",  60000UL);
-  dutyCyclePct      = constrain(dutyCyclePct, 1.0f, 100.0f);
-  dutyCyclePeriodMs = constrain((uint32_t)dutyCyclePeriodMs, 1000UL, 3600000UL);
-  strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
-  activeProfile.name[31] = '\0';
-  activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
-  activeProfile.stabilityThreshC = prefs.getFloat("rp_stab",       2.0f);
-  activeProfile.coastBase        = prefs.getFloat("rp_cbase",     0.40f);
-  activeProfile.coastSlope       = prefs.getFloat("rp_cslope",    0.03f);
-  activeProfile.complete         = prefs.getBool ("rp_complete",  false);
-  activeProfile.stepCount        = (uint8_t)prefs.getUInt("rp_stepct", 7);
-  activeProfile.stepCount        = min(activeProfile.stepCount, (uint8_t)RAMP_MAX_STEPS);
-  {
-    size_t len = prefs.getBytesLength("rp_steps");
-    if (len == activeProfile.stepCount * sizeof(float)) {
-      prefs.getBytes("rp_steps", activeProfile.stepTargets,
-                     activeProfile.stepCount * sizeof(float));
-    }
-  }
-  prefs.end();
+   dutyCyclePct      = prefs.getFloat("dc_pct",    100.0f);
+   dutyCyclePeriodSec = prefs.getUInt("dc_period",  60UL);
+   dutyCyclePct      = constrain(dutyCyclePct, 1.0f, 100.0f);
+   dutyCyclePeriodSec = constrain((uint32_t)dutyCyclePeriodSec, 1UL, 3600UL);
+   strncpy(activeProfile.name, prefs.getString("rp_name", "default").c_str(), 31);
+   activeProfile.name[31] = '\0';
+   activeProfile.soakMinutes      = prefs.getFloat("rp_soak",      30.0f);
+   activeProfile.stabilityThreshC = prefs.getFloat("rp_stab",       2.0f);
+   activeProfile.coastBase        = prefs.getFloat("rp_cbase",     0.40f);
+   activeProfile.coastSlope       = prefs.getFloat("rp_cslope",    0.03f);
+   activeProfile.complete         = prefs.getBool ("rp_complete",  false);
+   activeProfile.stepCount        = (uint8_t)prefs.getUInt("rp_stepct", 7);
+   activeProfile.stepCount        = min(activeProfile.stepCount, (uint8_t)RAMP_MAX_STEPS);
+   {
+     size_t len = prefs.getBytesLength("rp_steps");
+     if (len == activeProfile.stepCount * sizeof(float)) {
+       prefs.getBytes("rp_steps", activeProfile.stepTargets,
+                      activeProfile.stepCount * sizeof(float));
+     }
+   }
+   prefs.end();
 }
 
 void savePrefs() {
@@ -1247,8 +1249,8 @@ void savePrefs() {
   prefs.putString("psk",   savedPSK);
   prefs.putString("wuser", webUser);
   prefs.putString("wpass", webPass);
-  prefs.putFloat ("dc_pct",    dutyCyclePct);
-  prefs.putUInt  ("dc_period", dutyCyclePeriodMs);
+   prefs.putFloat ("dc_pct",    dutyCyclePct);
+   prefs.putUInt  ("dc_period", dutyCyclePeriodSec);
   prefs.putString("rp_name",     activeProfile.name);
   prefs.putFloat ("rp_soak",     activeProfile.soakMinutes);
   prefs.putFloat ("rp_stab",     activeProfile.stabilityThreshC);
@@ -1302,7 +1304,9 @@ void setupRoutes() {
               + ",\"dcRemainingMs\":" + String(dcRemainingMs)
               + ",\"dcPeriodElapsedMs\":" + String(periodElapsedMs)
               + ",\"dcForceOff\":"   + String(dcForceOff ? 1 : 0)
-             + "}";
+              + ",\"rampState\":"    + String((int)rampState)
+              + ",\"rampStep\":"     + String(rampStep)
+              + "}";
     server.send(200, "application/json", j);
   });
 
@@ -1582,31 +1586,31 @@ void setupRoutes() {
     server.send(200, "application/json", j);
   });
 
-  server.on("/dutycycle", HTTP_POST, []() {
-    if (!requireAuth()) return;
-    bool changed = false;
-    if (server.hasArg("pct")) {
-      float v = server.arg("pct").toFloat();
-      v = constrain(v, 1.0f, 100.0f);
-      dutyCyclePct = v;
-      changed = true;
-    }
-    if (server.hasArg("period_ms")) {
-      uint32_t v = (uint32_t)server.arg("period_ms").toInt();
-      v = constrain(v, 1000UL, 3600000UL);
-      dutyCyclePeriodMs = v;
-      changed = true;
-    }
-    if (changed) {
-      // Reset the period window immediately on setting change.
-      dcPeriodStartMs    = millis();
-      dcOnTimeThisPeriod = 0;
-      dcForceOff         = false;
-      dcOnStartMs        = 0;
-      savePrefs();
-    }
-    server.send(200, "text/plain", "OK");
-  });
+   server.on("/dutycycle", HTTP_POST, []() {
+     if (!requireAuth()) return;
+     bool changed = false;
+     if (server.hasArg("pct")) {
+       float v = server.arg("pct").toFloat();
+       v = constrain(v, 1.0f, 100.0f);
+       dutyCyclePct = v;
+       changed = true;
+     }
+     if (server.hasArg("period_sec")) {
+       uint32_t v = (uint32_t)server.arg("period_sec").toInt();
+       v = constrain(v, 1UL, 3600UL);
+       dutyCyclePeriodSec = v;
+       changed = true;
+     }
+     if (changed) {
+       // Reset the period window immediately on setting change.
+       dcPeriodStartMs    = millis();
+       dcOnTimeThisPeriod = 0;
+       dcForceOff         = false;
+       dcOnStartMs        = 0;
+       savePrefs();
+     }
+     server.send(200, "text/plain", "OK");
+   });
 
   server.on("/log", HTTP_GET, []() {
     uint32_t since = 0;

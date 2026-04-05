@@ -293,8 +293,8 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
     <label>Max ON % per period
       <input type="number" step="1" min="1" max="100" id="dcPct" value="100">
     </label>
-    <label>Period (ms)
-      <input type="number" step="1000" min="1000" max="3600000" id="dcPeriodMs" value="60000">
+    <label>Period (s)
+      <input type="number" step="1" min="1" max="3600" id="dcPeriodMs" value="60">
     </label>
     <button onclick="saveDutyCycle()">Save Duty Cycle</button>
     <canvas id="dcBar" width="220" height="40" style="width:100%;height:40px;display:block;margin-top:.4rem;"></canvas>
@@ -913,7 +913,7 @@ async function poll() {
     }
 
     // Update duty cycle display from status
-    drawDutyCycleBar(st.dcPct, st.dcPeriodMs, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
+    drawDutyCycleBar(st.dcPct, st.dcPeriodSec, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
     // Only overwrite input fields when device value actually changed (not user edits)
     const dcPctEl = document.getElementById('dcPct');
     const dcPerEl = document.getElementById('dcPeriodMs');
@@ -1036,17 +1036,17 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
 
 async function saveDutyCycle() {
   const pct = parseFloat(document.getElementById('dcPct').value);
-  const ms  = parseInt(document.getElementById('dcPeriodMs').value, 10);
-  if (isNaN(pct) || isNaN(ms)) { alert('Invalid values'); return; }
+  const sec = parseInt(document.getElementById('dcPeriodMs').value, 10);
+  if (isNaN(pct) || isNaN(sec)) { alert('Invalid values'); return; }
   try {
     const r = await fetch('/dutycycle', {
       method: 'POST',
-      body: new URLSearchParams({ pct: pct.toFixed(1), period_ms: ms })
+      body: new URLSearchParams({ pct: pct.toFixed(1), period_sec: sec })
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     document.getElementById('dcMsg').textContent = 'Saved.';
     document.getElementById('dcPct').dataset.lastDevice = pct.toFixed(0);
-    document.getElementById('dcPeriodMs').dataset.lastDevice = String(ms);
+    document.getElementById('dcPeriodMs').dataset.lastDevice = String(sec);
   } catch(e) {
     document.getElementById('dcMsg').textContent = 'Failed: ' + e;
   }
