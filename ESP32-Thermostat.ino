@@ -1284,23 +1284,23 @@ void setupRoutes() {
 
   server.on("/status", HTTP_GET, []() {
     unsigned long periodElapsedMs = millis() - dcPeriodStartMs;
-    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)(dutyCyclePeriodSec * 1000UL));
     uint32_t dcRemainingMs = (dcAllowedMs > dcOnTimeThisPeriod)
-                           ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
+                            ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
     String j = "{\"temp\":"         + String(currentTemp,  1)
-             + ",\"setpoint\":"     + String(setpoint,      1)
-             + ",\"output\":"       + String(outputOn ? 1 : 0)
-             + ",\"heatRequested\":" + String(heatRequested ? 1 : 0)
-             + ",\"selectedMode\":" + String((int)selectedMode)
-             + ",\"modeRunning\":"  + String(modeRunning ? 1 : 0)
-             + ",\"stopLatched\":"  + String(stopLatched ? 1 : 0)
-             + ",\"runActive\":"    + String(runActive ? 1 : 0)
-             + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
-             + ",\"hysteresis\":"   + String(hysteresis,    1)
-             + ",\"offset\":"       + String(probeOffset,   1)
-             + ",\"dcPct\":"        + String(dutyCyclePct,  1)
-             + ",\"dcPeriodMs\":"   + String(dutyCyclePeriodMs)
-             + ",\"dcOnTimeMs\":"   + String(dcOnTimeThisPeriod)
+              + ",\"setpoint\":"     + String(setpoint,      1)
+              + ",\"output\":"       + String(outputOn ? 1 : 0)
+              + ",\"heatRequested\":" + String(heatRequested ? 1 : 0)
+              + ",\"selectedMode\":" + String((int)selectedMode)
+              + ",\"modeRunning\":"  + String(modeRunning ? 1 : 0)
+              + ",\"stopLatched\":"  + String(stopLatched ? 1 : 0)
+              + ",\"runActive\":"    + String(runActive ? 1 : 0)
+              + ",\"runElapsed\":"   + String(runActive ? (millis()-runStartMs)/1000UL : 0UL)
+              + ",\"hysteresis\":"   + String(hysteresis,    1)
+              + ",\"offset\":"       + String(probeOffset,   1)
+              + ",\"dcPct\":"        + String(dutyCyclePct,  1)
+              + ",\"dcPeriodMs\":"   + String((dutyCyclePeriodSec * 1000UL))
+              + ",\"dcOnTimeMs\":"   + String(dcOnTimeThisPeriod)
               + ",\"dcRemainingMs\":" + String(dcRemainingMs)
               + ",\"dcPeriodElapsedMs\":" + String(periodElapsedMs)
               + ",\"dcForceOff\":"   + String(dcForceOff ? 1 : 0)
@@ -1573,16 +1573,16 @@ void setupRoutes() {
   // POST /dutycycle  → accepts pct= (1–100) and period_ms= (1000–3600000)
   server.on("/dutycycle", HTTP_GET, []() {
     unsigned long periodElapsedMs = millis() - dcPeriodStartMs;
-    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)dutyCyclePeriodMs);
+    uint32_t dcAllowedMs = (uint32_t)((dutyCyclePct / 100.0f) * (float)(dutyCyclePeriodSec * 1000UL));
     uint32_t dcRemainingMs = (dcAllowedMs > dcOnTimeThisPeriod)
-                           ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
+                            ? (dcAllowedMs - dcOnTimeThisPeriod) : 0;
     String j = "{\"pct\":"       + String(dutyCyclePct, 1)
-             + ",\"period_ms\":" + String(dutyCyclePeriodMs)
-             + ",\"onTimeMs\":"  + String(dcOnTimeThisPeriod)
-             + ",\"remainMs\":"  + String(dcRemainingMs)
-             + ",\"periodElapsedMs\":" + String(periodElapsedMs)
-             + ",\"forceOff\":"  + String(dcForceOff ? 1 : 0)
-             + "}";
+              + ",\"period_ms\":" + String((dutyCyclePeriodSec * 1000UL))
+              + ",\"onTimeMs\":"  + String(dcOnTimeThisPeriod)
+              + ",\"remainMs\":"  + String(dcRemainingMs)
+              + ",\"periodElapsedMs\":" + String(periodElapsedMs)
+              + ",\"forceOff\":"  + String(dcForceOff ? 1 : 0)
+              + "}";
     server.send(200, "application/json", j);
   });
 
