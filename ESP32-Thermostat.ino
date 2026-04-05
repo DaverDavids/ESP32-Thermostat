@@ -1242,6 +1242,11 @@ void loadPrefs() {
                       activeProfile.stepCount * sizeof(float));
      }
    }
+   // Load pin polling preference (default to true if not set)
+   bool pinPollDefault = true;
+   if (prefs.isKey("pinpoll")) {
+     pinPollDefault = prefs.getBool("pinpoll");
+   }
    prefs.end();
 }
 
@@ -1776,5 +1781,29 @@ void setupRoutes() {
     savePrefs();
     DBGLN("Auth credentials updated");
     server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/pinpolling", HTTP_POST, []() {
+    if (!requireAuth()) return;
+    if (!server.hasArg("enabled")) {
+      server.send(400, "text/plain", "Missing enabled parameter"); return;
+    }
+    bool enabled = server.arg("enabled") == "true";
+    // Store preference for pin polling state
+    prefs.begin("therm", false);
+    prefs.putBool("pinpoll", enabled);
+    prefs.end();
+    DBG("Pin polling set to: "); DBGLN(enabled ? "ENABLED" : "DISABLED");
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/pinpolling", HTTP_GET, []() {
+    if (!requireAuth()) return;
+    // Get preference for pin polling state
+    prefs.begin("therm", true);
+    bool enabled = prefs.getBool("pinpoll", true); // default to true
+    prefs.end();
+    String state = enabled ? "true" : "false";
+    server.send(200, "text/plain", state);
   });
 }

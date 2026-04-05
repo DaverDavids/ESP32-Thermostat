@@ -805,6 +805,7 @@ async function showRunSummary(learnedSteps, stepTargets) {
 let wasRunActive    = false;
 let wasSelectedMode = 0;
 const RAMP_STATE_NAMES = [ 'IDLE', 'HEATING', 'COASTING', 'SOAKING', 'OVERSHOOT WAIT', 'FINAL SOAK', 'DONE' ];
+const modeNames        = ['Manual', 'Bang-Bang', 'Auto-Ramp'];
 
 let pollInFlight = false;
 async function poll() {
@@ -1211,10 +1212,14 @@ function setManual(action) {
 <!-- ── GPIO / Pin Debug Panel ─────────────────────────────────────── -->
 <div style="margin-bottom:.75rem">
   <div class="card" id="pinDebugPanel">
-    <h2 style="cursor:pointer;user-select:none;" onclick="togglePinPanel()">
-      &#x1F527; GPIO Pin State
-      <span id="pinPanelToggle" style="font-size:.75rem;color:#aaa;margin-left:.5rem;">[collapse]</span>
-    </h2>
+<h2 style="cursor:pointer;user-select:none;" onclick="togglePinPanel()">
+  &#x1F527; GPIO Pin State
+  <span id="pinPanelToggle" style="font-size:.75rem;color:#aaa;margin-left:.5rem;">[collapse]</span>
+  <label style="margin-left:1rem;display:flex;align-items:center;gap:.3rem;font-size:.85rem;">
+    <input type="checkbox" id="pinPollToggle" checked>
+    <span>Enable Polling</span>
+  </label>
+</h2>
     <div id="pinPanelBody">
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.5rem;margin-bottom:.75rem;">
         <div class="pin-cell" id="pc-btnUp">
@@ -1289,12 +1294,54 @@ function setManual(action) {
 <script>
 (function(){
   let pinPanelOpen = true;
+let pinPollingEnabled = true;
+
+  // Load pin polling preference from device on page load
+  async function loadPinPollingPreference() {
+    try {
+      const response = await fetch('/pinpolling');
+      const enabledText = await response.text();
+      pinPollingEnabled = enabledText === 'true';
+      document.getElementById('pinPollToggle').checked = pinPollingEnabled;
+      updatePinPanelAppearance();
+    } catch(e) {
+      console.warn('Failed to load pin polling preference:', e);
+      // Default to true if we can't load from device
+      pinPollingEnabled = true;
+      document.getElementById('pinPollToggle').checked = true;
+      updatePinPanelAppearance();
+    }
+  }
 
   window.togglePinPanel = function() {
     pinPanelOpen = !pinPanelOpen;
     document.getElementById('pinPanelBody').style.display = pinPanelOpen ? '' : 'none';
     document.getElementById('pinPanelToggle').textContent = pinPanelOpen ? '[collapse]' : '[expand]';
   };
+
+  document.getElementById('pinPollToggle').addEventListener('change', function() {
+    pinPollingEnabled = this.checked;
+    updatePinPanelAppearance();
+    // Save preference to device
+    fetch('/pinpolling', {
+      method: 'POST',
+      body: new URLSearchParams({enabled: pinPollingEnabled})
+    }).catch(e => console.warn('Failed to save pin polling preference:', e));
+  });
+
+  function updatePinPanelAppearance() {
+    const panel = document.getElementById('pinDebugPanel');
+    if (pinPollingEnabled) {
+      panel.style.opacity = '1';
+      panel.style.filter = 'none';
+    } else {
+      panel.style.opacity = '0.6';
+      panel.style.filter = 'grayscale(100%)';
+    }
+  }
+
+  // Load preference when script initializes
+  loadPinPollingPreference();
 
   function setPinCell(id, isActive, valText, phaseText, activeClass) {
     const cell  = document.getElementById('pc-' + id);
@@ -1307,36 +1354,37 @@ function setManual(action) {
     if (phase && phaseText !== undefined) phase.textContent = phaseText;
   }
 
-  async function pollPins() {
-    try {
-      const p = await fetch('/pinstatus').then(r => r.json());
+   async function pollPins() {
+     if (!pinPollingEnabled) return;
+     try {
+       const p = await fetch('/pinstatus').then(r => r.json());
+ 
+       setPinCell('btnUp',  p.btnUp,  p.btnUp  ? 'PRESSED' : 'OPEN', p.btnUpPhase,  'pressed');
+       setPinCell('btnDn',  p.btnDn,  p.btnDn  ? 'PRESSED' : 'OPEN', p.btnDnPhase,  'pressed');
+       setPinCell('btnCtr', p.btnCtr, p.btnCtr ? 'PRESSED' : 'OPEN', p.btnCtrPhase, 'pressed');
+       setPinCell('mosfet', p.outputOn, p.outputOn ? 'HIGH / ON' : 'LOW / OFF', 'OUTPUT', 'active');
+ 
+       const fOut  = document.getElementById('flag-outputOn');
+       const fStop = document.getElementById('flag-stop');
+       const fMode = document.getElementById('flag-mode');
+       const fEs   = document.getElementById('flag-estop');
+ 
+       fOut.textContent  = 'outputOn: ' + (p.outputOn ? 'YES' : 'NO');
+       fOut.className    = 'badge ' + (p.outputOn  ? 'on' : 'off');
+ 
+       fStop.textContent = 'E-STOP: '   + (p.stopLatched ? 'LATCHED' : 'clear');
+       fStop.className   = 'badge '     + (p.stopLatched ? 'off' : 'on');
+ 
+       fMode.textContent = 'running: '  + (p.modeRunning ? 'YES' : 'NO');
+       fMode.className   = 'badge '     + (p.modeRunning ? 'auto' : 'off');
+ 
+       fEs.textContent      = 'E-stop presses: ' + p.estopCount + '/3';
+       fEs.style.background = p.estopCount > 0 ? '#e67e22' : '#555';
+ 
+     } catch(e) { /* device unreachable during reboot */ }
+   }
 
-      setPinCell('btnUp',  p.btnUp,  p.btnUp  ? 'PRESSED' : 'OPEN', p.btnUpPhase,  'pressed');
-      setPinCell('btnDn',  p.btnDn,  p.btnDn  ? 'PRESSED' : 'OPEN', p.btnDnPhase,  'pressed');
-      setPinCell('btnCtr', p.btnCtr, p.btnCtr ? 'PRESSED' : 'OPEN', p.btnCtrPhase, 'pressed');
-      setPinCell('mosfet', p.outputOn, p.outputOn ? 'HIGH / ON' : 'LOW / OFF', 'OUTPUT', 'active');
-
-      const fOut  = document.getElementById('flag-outputOn');
-      const fStop = document.getElementById('flag-stop');
-      const fMode = document.getElementById('flag-mode');
-      const fEs   = document.getElementById('flag-estop');
-
-      fOut.textContent  = 'outputOn: ' + (p.outputOn ? 'YES' : 'NO');
-      fOut.className    = 'badge ' + (p.outputOn  ? 'on' : 'off');
-
-      fStop.textContent = 'E-STOP: '   + (p.stopLatched ? 'LATCHED' : 'clear');
-      fStop.className   = 'badge '     + (p.stopLatched ? 'off' : 'on');
-
-      fMode.textContent = 'running: '  + (p.modeRunning ? 'YES' : 'NO');
-      fMode.className   = 'badge '     + (p.modeRunning ? 'auto' : 'off');
-
-      fEs.textContent      = 'E-stop presses: ' + p.estopCount + '/3';
-      fEs.style.background = p.estopCount > 0 ? '#e67e22' : '#555';
-
-    } catch(e) { /* device unreachable during reboot */ }
-  }
-
-  setInterval(pollPins, 200);
+   setInterval(() => { if (pinPanelOpen) pollPins(); }, 500);
   pollPins();
 })();
 </script>
