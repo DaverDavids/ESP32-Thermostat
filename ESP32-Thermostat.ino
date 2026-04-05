@@ -848,8 +848,13 @@ void updateButtons() {
                 DBGLN("Mode stopped");
               } else {
                 // Bang-bang or ramp: short press starts the run
-                modeRunning = true;
-                if (selectedMode == MODE_AUTO_RAMP) {
+                 modeRunning = true;
+                 runActive   = true;
+                 runStartMs  = now;
+                 cacheHead   = 0;
+                 cacheCount  = 0;
+                 openRunLog();
+                 if (selectedMode == MODE_AUTO_RAMP) {
                   rampState        = RS_IDLE;
                   rampStep         = 0;
                   rampOvershootAmt = 0.0f;

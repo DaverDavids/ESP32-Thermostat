@@ -160,6 +160,21 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
   </div>
 </div>
 
+<!-- ── Run Chart (full width) ─────────────────────────────────────────────── -->
+<div class="row row-1">
+  <div class="card">
+    <h2>&#x1F4CA; Run Chart</h2>
+    <canvas id="runChart" style="width:100%;height:220px;display:block;"></canvas>
+    <div id="chartLegend" style="font-size:.8rem;color:#aaa;margin-top:.3rem;display:flex;gap:1rem;flex-wrap:wrap;">
+      <span style="color:#0f9;">&#9644; Temperature</span>
+      <span style="color:#e94560;">&#9644; Setpoint</span>
+      <span style="color:#f39c12;">&#9644; Step Targets</span>
+      <span style="color:rgba(46,204,113,0.4);">&#9644; Heater ON</span>
+    </div>
+    <div id="chartMsg" style="font-size:.85rem;color:#aaa;margin-top:.3rem;">Waiting for run data...</div>
+  </div>
+</div>
+
 <!-- ── Row 3: Ramp Profile + Profile Library ─────────────────────────────── -->
 <div class="row row-2">
   <div class="card" id="profilePanel" style="display:none;">
@@ -294,7 +309,7 @@ const char HTML_INDEX[] PROGMEM = R"rawhtml(
       <input type="number" step="1" min="1" max="100" id="dcPct" value="100">
     </label>
     <label>Period (s)
-      <input type="number" step="1" min="1" max="3600" id="dcPeriodMs" value="60">
+      <input type="number" step="1" min="1" max="3600" id="dcPeriodSec" value="60">
     </label>
     <button onclick="saveDutyCycle()">Save Duty Cycle</button>
     <canvas id="dcBar" width="220" height="40" style="width:100%;height:40px;display:block;margin-top:.4rem;"></canvas>
@@ -916,14 +931,14 @@ async function poll() {
     drawDutyCycleBar(st.dcPct, st.dcPeriodSec, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
     // Only overwrite input fields when device value actually changed (not user edits)
     const dcPctEl = document.getElementById('dcPct');
-    const dcPerEl = document.getElementById('dcPeriodMs');
+    const dcPerEl = document.getElementById('dcPeriodSec');
     if (dcPctEl && dcPctEl.dataset.lastDevice !== String(st.dcPct.toFixed(0))) {
       dcPctEl.value = st.dcPct.toFixed(0);
       dcPctEl.dataset.lastDevice = st.dcPct.toFixed(0);
     }
-    if (dcPerEl && dcPerEl.dataset.lastDevice !== String(st.dcPeriodMs)) {
-      dcPerEl.value = st.dcPeriodMs;
-      dcPerEl.dataset.lastDevice = String(st.dcPeriodMs);
+    if (dcPerEl && dcPerEl.dataset.lastDevice !== String(st.dcPeriodSec)) {
+      dcPerEl.value = st.dcPeriodSec;
+      dcPerEl.dataset.lastDevice = String(st.dcPeriodSec);
     }
 
     if (st.runActive) { syncLog(); periodicFullSync(); }
@@ -1036,7 +1051,7 @@ document.getElementById('wifiForm').addEventListener('submit', async e => {
 
 async function saveDutyCycle() {
   const pct = parseFloat(document.getElementById('dcPct').value);
-  const sec = parseInt(document.getElementById('dcPeriodMs').value, 10);
+  const sec = parseInt(document.getElementById('dcPeriodSec').value, 10);
   if (isNaN(pct) || isNaN(sec)) { alert('Invalid values'); return; }
   try {
     const r = await fetch('/dutycycle', {
@@ -1046,7 +1061,7 @@ async function saveDutyCycle() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     document.getElementById('dcMsg').textContent = 'Saved.';
     document.getElementById('dcPct').dataset.lastDevice = pct.toFixed(0);
-    document.getElementById('dcPeriodMs').dataset.lastDevice = String(sec);
+    document.getElementById('dcPeriodSec').dataset.lastDevice = String(sec);
   } catch(e) {
     document.getElementById('dcMsg').textContent = 'Failed: ' + e;
   }
