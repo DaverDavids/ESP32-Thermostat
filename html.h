@@ -914,7 +914,7 @@ async function poll() {
     }
 
     // Update duty cycle display from status
-    drawDutyCycleBar(st.dcPct, st.dcPeriodSec, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
+    drawDutyCycleBar(st.dcPct, st.dcPeriodSec * 1000, st.dcOnTimeMs, st.dcRemainingMs, st.dcForceOff, st.dcPeriodElapsedMs);
     // Only overwrite input fields when device value actually changed (not user edits)
     const dcPctEl = document.getElementById('dcPct');
     const dcPerEl = document.getElementById('dcPeriodSec');

@@ -48,7 +48,7 @@ const uint32_t IP_SPLASH_MS = 2000;
 const char*    HOSTNAME        = "thermostat";
 const uint32_t WIFI_TIMEOUT_MS =  20000;
 const uint32_t WIFI_RETRY_MS   = 300000;
-#define        WIFI_TX_POWER     WIFI_POWER_8_5dBm
+#define        WIFI_TX_POWER     WIFI_POWER_11dBm
 
 // ─── Timing ───────────────────────────────────────────────────────────────────
 const uint32_t FAST_SAMPLE_MS = 250;  // MAX6675 min conversion time ~170ms; use 250ms
@@ -653,7 +653,7 @@ void loop() {
     // Periodically re-check the duty-cycle gate so it can cut the output
     // mid-heating even when the control loop doesn't call applyHeater().
     // When the period resets and we still want heat, re-enable the output.
-    if (heatRequested && !stopLatched && modeRunning) {
+    if (heatRequested && !stopLatched) {
       bool gated = dutyCycleGate(true);
       if (gated && !outputOn) {
         outputOn = true;
@@ -1309,7 +1309,7 @@ void setupRoutes() {
               + ",\"hysteresis\":"   + String(hysteresis,    1)
               + ",\"offset\":"       + String(probeOffset,   1)
               + ",\"dcPct\":"        + String(dutyCyclePct,  1)
-              + ",\"dcPeriodMs\":"   + String((dutyCyclePeriodSec * 1000UL))
+              + ",\"dcPeriodSec\":"  + String(dutyCyclePeriodSec)
               + ",\"dcOnTimeMs\":"   + String(dcOnTimeThisPeriod)
               + ",\"dcRemainingMs\":" + String(dcRemainingMs)
               + ",\"dcPeriodElapsedMs\":" + String(periodElapsedMs)
