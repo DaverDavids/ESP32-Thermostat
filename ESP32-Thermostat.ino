@@ -145,6 +145,9 @@ float     rampCutoffTemp    = 0.0f;
 float     rampPeakTemp      = 0.0f;
 float     rampOvershootAmt  = 0.0f;
 float     rampRefireStartTemp = 0.0f;
+float     rampCoastPeak       = 0.0f;
+bool      rampPeakSeen       = false;
+uint32_t  soakStartMs       = 0;
 unsigned long rampStateEnteredMs = 0;
 unsigned long finalSoakStartMs   = 0;
 
@@ -405,6 +408,28 @@ void closeRunLog() {
   }
 }
 
+const char* modeStr(uint8_t m) {
+  switch(m) {
+    case 0: return "IDLE";
+    case 1: return "MANUAL";
+    case 2: return "BANG_BANG";
+    case 3: return "AUTO_RAMP";
+    default: return "?";
+  }
+}
+
+const char* rampStateStr(uint8_t s) {
+  switch(s) {
+    case 0: return "RS_IDLE";
+    case 1: return "RS_HEATING";
+    case 2: return "RS_COASTING";
+    case 3: return "RS_SOAKING";
+    case 4: return "RS_FINAL_SOAK";
+    case 5: return "RS_DONE";
+    default: return "?";
+  }
+}
+
 void appendRunLog(uint32_t t_s, float tC, float sp,
                   uint8_t output, uint8_t heat_req,
                   uint8_t mode, uint8_t ramp_state,
@@ -421,8 +446,8 @@ void appendRunLog(uint32_t t_s, float tC, float sp,
   runLogFile.print(sp, 1);         runLogFile.print(',');
   runLogFile.print(output);         runLogFile.print(',');
   runLogFile.print(heat_req);       runLogFile.print(',');
-  runLogFile.print(mode);           runLogFile.print(',');
-  runLogFile.print(ramp_state);     runLogFile.print(',');
+  runLogFile.print(modeStr(mode));   runLogFile.print(',');
+  runLogFile.print(rampStateStr(ramp_state)); runLogFile.print(',');
   runLogFile.print(step_idx);       runLogFile.print(',');
   runLogFile.println(coast_ratio, 4);
   // Throttled flush: avoids a blocking SPIFFS write on every 500ms sample.
@@ -855,31 +880,28 @@ void updateButtons() {
                  cacheHead   = 0;
                  cacheCount  = 0;
                  openRunLog();
-                 if (selectedMode == MODE_AUTO_RAMP) {
-                  rampState        = RS_IDLE;
-                  rampStep         = 0;
-                  rampOvershootAmt = 0.0f;
-                  learnedCount     = 0;
-                  finalSoakStartMs = 0;
-                  resetStabilityBuf();
-                  coastingDropCount = 0;
-                  soakHeaterOffMs   = 0;
-                  memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
-                  memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
-                  memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
-                  memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
-                  runActive  = true;
-                  runStartMs = now;
-                  cacheHead  = 0;
-                  cacheCount = 0;
-                  openRunLog();
-                } else if (selectedMode == MODE_BANG_BANG) {
-                  runActive  = true;
-                  runStartMs = now;
-                  cacheHead  = 0;
-                  cacheCount = 0;
-                  openRunLog();
-                }
+if (selectedMode == MODE_AUTO_RAMP) {
+                   rampState        = RS_IDLE;
+                   rampStep         = 0;
+                   rampOvershootAmt = 0.0f;
+                   rampCoastPeak    = 0.0f;
+                   rampPeakSeen     = false;
+                   soakStartMs      = 0;
+                   learnedCount     = 0;
+                   finalSoakStartMs = 0;
+                   resetStabilityBuf();
+                   coastingDropCount = 0;
+                   soakHeaterOffMs   = 0;
+                   memset(learnedFireStartTemp, 0, sizeof(learnedFireStartTemp));
+                   memset(learnedCutoffTemp,    0, sizeof(learnedCutoffTemp));
+                   memset(learnedPeakTemp,      0, sizeof(learnedPeakTemp));
+                   memset(learnedCoastRatio,    0, sizeof(learnedCoastRatio));
+                   runActive  = true;
+                   runStartMs = now;
+                   cacheHead  = 0;
+                   cacheCount = 0;
+                   openRunLog();
+                 }
                 DBGLN("Mode started");
               }
             }
@@ -987,6 +1009,9 @@ void rampControlLoop() {
       rampStateEnteredMs = millis();
       rampFireStartTemp  = currentTemp;
       rampRefireStartTemp = 0.0f;
+      rampCoastPeak      = 0.0f;
+      rampPeakSeen       = false;
+      soakStartMs        = 0;
       resetStabilityBuf();
       coastingDropCount  = 0;
       soakHeaterOffMs    = 0;
@@ -1020,6 +1045,11 @@ void rampControlLoop() {
           rampPeakTemp   = currentTemp;
           rampOvershootAmt = 0.0f;
           rampState = isFinalStep ? RS_FINAL_SOAK : RS_SOAKING;
+          if (rampState == RS_SOAKING) {
+            rampCoastPeak = currentTemp;
+            rampPeakSeen  = false;
+            soakStartMs   = millis();  // record when we first entered soaking
+          }
           setpoint = stepTarget;
           if (rampState == RS_FINAL_SOAK) finalSoakStartMs = millis();
           rampStateEnteredMs = millis();
@@ -1033,6 +1063,9 @@ void rampControlLoop() {
     }
 
     case RS_COASTING: {
+      // Track peak continuously for first-descent detection
+      if (currentTemp > rampCoastPeak) rampCoastPeak = currentTemp;
+
       if (currentTemp > rampPeakTemp) {
         rampPeakTemp      = currentTemp;
         coastingDropCount = 0;
@@ -1073,94 +1106,53 @@ void rampControlLoop() {
 
         resetStabilityBuf();
         soakHeaterOffMs = 0;
-        // FIX: lowered overshoot threshold from 10°C to 5°C.
-        // A +7.5°C overshoot is significant enough to route to RS_OVERSHOOT_WAIT
-        // so the temperature can fall back toward the target before re-heating.
-        rampState = (rampOvershootAmt > 5.0f) ? RS_OVERSHOOT_WAIT : RS_SOAKING;
+        // Always go to RS_SOAKING - handle overshoot naturally with first-descent logic
+        rampState     = RS_SOAKING;
+        rampCoastPeak = currentTemp;   // seed peak with transition temp
+        rampPeakSeen  = false;
+        soakStartMs   = millis();       // record when we first entered soaking
         rampStateEnteredMs = millis();
       }
       break;
     }
 
-    case RS_SOAKING:
-    case RS_OVERSHOOT_WAIT: {
-      // In overshoot wait: just wait for temp to drop to target before doing anything
-      if (rampState == RS_OVERSHOOT_WAIT && currentTemp > stepTarget + 1.0f) {
-        applyHeater(false);
-        break;  // stay here until cooled down; skip refire and stability check
-      }
-      // Transition OVERSHOOT_WAIT -> SOAKING once cool enough
-      if (rampState == RS_OVERSHOOT_WAIT && currentTemp <= stepTarget + 1.0f) {
-        rampState = RS_SOAKING;
-        rampStateEnteredMs = millis();
+    case RS_SOAKING: {
+      // Track peak during soaking
+      if (currentTemp > rampCoastPeak) {
+        rampCoastPeak = currentTemp;
+        rampPeakSeen  = false;  // still rising
+      } else if (!rampPeakSeen && currentTemp < rampCoastPeak - 0.5f) {
+        // First confirmed downtick of >= 0.5°C — THIS is the peak
+        rampPeakSeen  = true;
+        rampPeakTemp  = rampCoastPeak;
+        // Record learned data for this step
+        learnedPeakTemp[rampStep]     = rampPeakTemp;
+        learnedCutoffTemp[rampStep]   = rampCutoffTemp;
+        learnedFireStartTemp[rampStep]= rampFireStartTemp;
+        float rise = rampCutoffTemp - rampFireStartTemp;
+        if (rise > 1.0f)
+          learnedCoastRatio[rampStep] = (rampPeakTemp - rampCutoffTemp) / rise;
+        if (learnedCount <= rampStep) learnedCount = rampStep + 1;
+        refitCoastModel();
+        // Advance immediately
+        rampStep++;
+        soakStartMs = 0;  // reset for next step
+        if (rampStep >= activeProfile.stepCount) {
+          rampState        = RS_FINAL_SOAK;
+          finalSoakStartMs = millis();
+        } else {
+          rampState     = RS_IDLE;
+          rampCoastPeak = 0.0f;
+          rampPeakSeen  = false;
+          soakStartMs   = 0;
+        }
         resetStabilityBuf();
         soakHeaterOffMs = 0;
+        applyHeater(false);
+        rampStateEnteredMs = millis();
+        break;
       }
-
-      // Coast-aware refire: compute cutoff the same way the initial ramp does.
-      // This prevents thermal mass from causing runaway on every refire.
-      if (!outputOn && currentTemp < stepTarget - 2.0f) {
-          rampRefireStartTemp = currentTemp;   // capture baseline here
-          applyHeater(true);
-      }
-      float soakCutoff = stepTarget - effectiveCoastRatio(stepTarget)
-                                 * (stepTarget - rampRefireStartTemp);
-      soakCutoff = max(soakCutoff, stepTarget - 3.0f); // floor: never cut below target-3
-      if (outputOn && currentTemp >= soakCutoff) {
-          rampCutoffTemp = currentTemp;      // record actual cutoff for learning
-          applyHeater(false);                // coast from here
-      }
-
-      // FIX: gate isStable() behind a settle delay after the heater turns off.
-      // Oscillation samples written while the heater is cycling poison the
-      // stability buffer.  Only sample once the temperature has had time to
-      // settle (SOAK_SETTLE_MS after the last heater-off event).
-      bool settled = (soakHeaterOffMs != 0) &&
-                     ((millis() - soakHeaterOffMs) >= SOAK_SETTLE_MS);
-
-      // FIX: 10-minute timeout fallback so the step is never permanently stuck.
-      bool soakTimedOut = (millis() - rampStateEnteredMs) >= SOAK_TIMEOUT_MS;
-
-      if (soakTimedOut) {
-        DBG("Ramp: soak timeout, forcing advance at step "); DBGLN(rampStep);
-      }
-
-      bool advance = soakTimedOut || (settled && isStable());
-
-      if (advance) {
-        if (isFinalStep) {
-          rampState        = RS_FINAL_SOAK;
-          setpoint         = stepTarget;
-          finalSoakStartMs = millis();
-          rampStateEnteredMs = millis();
-          resetStabilityBuf();
-          soakHeaterOffMs  = 0;
-          DBGLN("Ramp: FINAL_SOAK started");
-        } else {
-          // FIX: learn coast ratio from soak refire overshoots
-          if (rampPeakTemp > stepTarget) {
-            float refireCoast = (rampPeakTemp - rampCutoffTemp) /
-                                max(stepTarget - rampFireStartTemp, 1.0f);
-            if (rampStep > 0 && rampStep <= MAX_LEARNED_STEPS) {
-              learnedCoastRatio[rampStep - 1] = max(learnedCoastRatio[rampStep - 1], refireCoast);
-              refitCoastModel();
-              DBG("Refire coast updated: "); DBGLN(refireCoast);
-            }
-          }
-
-          rampStep++;
-          setpoint          = activeProfile.stepTargets[rampStep];
-          rampState         = RS_HEATING;
-          rampFireStartTemp = currentTemp;
-          rampRefireStartTemp = 0.0f;
-          rampStateEnteredMs = millis();
-          resetStabilityBuf();
-          coastingDropCount = 0;
-          soakHeaterOffMs   = 0;
-          applyHeater(true);
-          DBG("Ramp: HEATING step "); DBGLN(rampStep);
-        }
-      }
+      applyHeater(false);  // no reheating — just coast through
       break;
     }
 
@@ -1572,6 +1564,9 @@ void setupRoutes() {
         rampState         = RS_IDLE;
         rampStep          = 0;
         rampOvershootAmt  = 0.0f;
+        rampCoastPeak     = 0.0f;
+        rampPeakSeen      = false;
+        soakStartMs       = 0;
         learnedCount      = 0;
         finalSoakStartMs  = 0;
         resetStabilityBuf();

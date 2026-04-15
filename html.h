@@ -648,6 +648,7 @@ async function stopRun() {
 // ── Run chart ─────────────────────────────────────────────────────────────────
 let runChartStepTargets = [];
 let runChartCurrentStep = 0;
+const CHART_WINDOW_SECS = 300; // Show last 5 minutes
 
 function drawRunChart() {
   dbGetAll().then(rows => {
@@ -677,20 +678,26 @@ function drawRunChart() {
     let yMax = Math.max(...allVals) + 15;
     if (yMax - yMin < 50) yMax = yMin + 50;
 
-    const tMin  = 0;
-    const tMax  = Math.max(...times, 60);
+    // Sliding window - always show last CHART_WINDOW_SECS anchored to now
+    const tMax = times[times.length - 1];
+    const tMin = Math.max(0, tMax - CHART_WINDOW_SECS);
 
-    const px = t => Math.round((t - tMin) / (tMax - tMin) * (w - 1));
+    const px = t => {
+      if (t < tMin) return -1; // skip points outside window
+      return Math.round((t - tMin) / (tMax - tMin) * (w - 1));
+    };
     const py = v => Math.round(h - (v - yMin) / (yMax - yMin) * (h - 1));
 
     // Output ON regions (shaded background)
     ctx.fillStyle = 'rgba(46, 204, 113, 0.08)';
     let onStart = -1;
     for (let i = 0; i < outs.length; i++) {
+      const x = px(times[i]);
+      if (x < 0) continue; // Skip points outside window
       if (outs[i] && onStart < 0) onStart = i;
       if ((!outs[i] || i === outs.length - 1) && onStart >= 0) {
         const x1 = px(times[onStart]);
-        const x2 = px(times[Math.min(i, outs.length - 1)]);
+        const x2 = x;
         ctx.fillRect(x1, 0, Math.max(x2 - x1, 1), h);
         onStart = -1;
       }
@@ -699,6 +706,7 @@ function drawRunChart() {
     ctx.setLineDash([4, 6]);
     ctx.lineWidth = 1;
     runChartStepTargets.forEach((tgt, i) => {
+      if (tgt < yMin || tgt > yMax) return; // Skip targets outside visible range
       const isActive = (i === runChartCurrentStep);
       ctx.strokeStyle = isActive ? '#f39c12' : 'rgba(243,156,18,0.35)';
       ctx.beginPath();
@@ -716,9 +724,13 @@ function drawRunChart() {
       ctx.lineWidth = 1;
       ctx.setLineDash([5, 5]);
       ctx.beginPath();
+      let first = true;
       sps.forEach((sp, i) => {
-        const x = px(times[i]), y = py(sp);
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        const x = px(times[i]);
+        if (x < 0) return; // Skip points outside window
+        const y = py(sp);
+        first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        first = false;
       });
       ctx.stroke();
       ctx.setLineDash([]);
@@ -727,9 +739,13 @@ function drawRunChart() {
     ctx.strokeStyle = '#0f9';
     ctx.lineWidth = 2;
     ctx.beginPath();
+    let first = true;
     temps.forEach((t, i) => {
-      const x = px(times[i]), y = py(t);
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      const x = px(times[i]);
+      if (x < 0) return; // Skip points outside window
+      const y = py(t);
+      first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      first = false;
     });
     ctx.stroke();
 
@@ -740,6 +756,16 @@ function drawRunChart() {
       const y = py(v);
       ctx.fillText(v.toFixed(0), 2, y - 2);
     }
+
+    // X-axis labels (time in seconds)
+    ctx.fillStyle = '#666';
+    ctx.textAlign = 'center';
+    for (let i = 0; i <= 4; i++) {
+      const t = tMin + (tMax - tMin) * (i / 4);
+      const x = Math.round((t - tMin) / (tMax - tMin) * (w - 1));
+      ctx.fillText(Math.round(t) + 's', x, h - 4);
+    }
+    ctx.textAlign = 'left';
   });
 }
 
