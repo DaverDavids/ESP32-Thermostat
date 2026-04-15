@@ -144,6 +144,7 @@ float     rampFireStartTemp = 0.0f;
 float     rampCutoffTemp    = 0.0f;
 float     rampPeakTemp      = 0.0f;
 float     rampOvershootAmt  = 0.0f;
+float     rampRefireStartTemp = 0.0f;
 unsigned long rampStateEnteredMs = 0;
 unsigned long finalSoakStartMs   = 0;
 
@@ -985,6 +986,7 @@ void rampControlLoop() {
       rampState          = RS_HEATING;
       rampStateEnteredMs = millis();
       rampFireStartTemp  = currentTemp;
+      rampRefireStartTemp = 0.0f;
       resetStabilityBuf();
       coastingDropCount  = 0;
       soakHeaterOffMs    = 0;
@@ -1082,14 +1084,28 @@ void rampControlLoop() {
 
     case RS_SOAKING:
     case RS_OVERSHOOT_WAIT: {
+      // In overshoot wait: just wait for temp to drop to target before doing anything
+      if (rampState == RS_OVERSHOOT_WAIT && currentTemp > stepTarget + 1.0f) {
+        applyHeater(false);
+        break;  // stay here until cooled down; skip refire and stability check
+      }
+      // Transition OVERSHOOT_WAIT -> SOAKING once cool enough
+      if (rampState == RS_OVERSHOOT_WAIT && currentTemp <= stepTarget + 1.0f) {
+        rampState = RS_SOAKING;
+        rampStateEnteredMs = millis();
+        resetStabilityBuf();
+        soakHeaterOffMs = 0;
+      }
+
       // Coast-aware refire: compute cutoff the same way the initial ramp does.
       // This prevents thermal mass from causing runaway on every refire.
-      float soakCutoff = stepTarget - effectiveCoastRatio(stepTarget)
-                                     * (stepTarget - rampFireStartTemp);
       if (!outputOn && currentTemp < stepTarget - 2.0f) {
-          rampFireStartTemp = currentTemp;   // reset fire baseline for this refire
+          rampRefireStartTemp = currentTemp;   // capture baseline here
           applyHeater(true);
       }
+      float soakCutoff = stepTarget - effectiveCoastRatio(stepTarget)
+                                 * (stepTarget - rampRefireStartTemp);
+      soakCutoff = max(soakCutoff, stepTarget - 3.0f); // floor: never cut below target-3
       if (outputOn && currentTemp >= soakCutoff) {
           rampCutoffTemp = currentTemp;      // record actual cutoff for learning
           applyHeater(false);                // coast from here
@@ -1136,6 +1152,7 @@ void rampControlLoop() {
           setpoint          = activeProfile.stepTargets[rampStep];
           rampState         = RS_HEATING;
           rampFireStartTemp = currentTemp;
+          rampRefireStartTemp = 0.0f;
           rampStateEnteredMs = millis();
           resetStabilityBuf();
           coastingDropCount = 0;
