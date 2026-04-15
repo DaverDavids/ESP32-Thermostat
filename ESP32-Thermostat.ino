@@ -450,8 +450,8 @@ bool     apMode         = false;
 
 float    probeOffset     =  0.0f;
 float    hysteresis      =  5.0f;
-String   savedSSID       = MYSSID;
-String   savedPSK        = MYPSK;
+String   savedSSID       = MYSSIDIOT;
+String   savedPSK        = MYPSKIOT;
 
 // ─── Web auth ─────────────────────────────────────────────────────────────────
 String webUser = "admin";
